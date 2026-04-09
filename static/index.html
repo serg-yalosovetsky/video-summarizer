@@ -1,0 +1,554 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Video Summarizer</title>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    :root {
+      --bg: #0f1117;
+      --surface: #1a1d27;
+      --border: #2e3148;
+      --accent: #6c63ff;
+      --accent-hover: #857dff;
+      --text: #e2e4f0;
+      --text-muted: #8b8fa8;
+      --green: #4ade80;
+      --red: #f87171;
+      --radius: 10px;
+    }
+
+    body {
+      background: var(--bg);
+      color: var(--text);
+      font-family: 'Segoe UI', system-ui, sans-serif;
+      min-height: 100vh;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      padding: 2rem 1rem 4rem;
+    }
+
+    main {
+      width: 100%;
+      max-width: 860px;
+      display: flex;
+      flex-direction: column;
+      gap: 1.5rem;
+    }
+
+    h1 {
+      font-size: 1.8rem;
+      font-weight: 700;
+      text-align: center;
+      letter-spacing: -0.02em;
+      background: linear-gradient(135deg, #c4b5fd, #818cf8);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+    }
+
+    /* Upload card */
+    .upload-card {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 1.5rem;
+      display: flex;
+      flex-direction: column;
+      gap: 1rem;
+    }
+
+    .file-row {
+      display: flex;
+      gap: 0.75rem;
+      align-items: center;
+      flex-wrap: wrap;
+    }
+
+    input[type="file"] {
+      flex: 1;
+      min-width: 0;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      color: var(--text);
+      padding: 0.55rem 0.75rem;
+      font-size: 0.9rem;
+      cursor: pointer;
+    }
+
+    input[type="file"]::-webkit-file-upload-button {
+      background: var(--border);
+      color: var(--text);
+      border: none;
+      padding: 0.35rem 0.8rem;
+      border-radius: 4px;
+      cursor: pointer;
+      font-size: 0.85rem;
+      margin-right: 0.5rem;
+    }
+
+    button#submit-btn {
+      background: var(--accent);
+      color: #fff;
+      border: none;
+      padding: 0.6rem 1.4rem;
+      border-radius: 6px;
+      font-size: 0.95rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: background 0.2s;
+      white-space: nowrap;
+    }
+
+    button#submit-btn:hover:not(:disabled) { background: var(--accent-hover); }
+    button#submit-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+    /* Progress */
+    #progress {
+      display: flex;
+      flex-direction: column;
+      gap: 0.5rem;
+      color: var(--text-muted);
+      font-size: 0.9rem;
+    }
+
+    .progress-top {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+    }
+
+    .spinner {
+      width: 18px;
+      height: 18px;
+      border: 2px solid var(--border);
+      border-top-color: var(--accent);
+      border-radius: 50%;
+      animation: spin 0.7s linear infinite;
+      flex-shrink: 0;
+    }
+
+    @keyframes spin { to { transform: rotate(360deg); } }
+
+    /* Whisper progress bar */
+    #whisper-progress-wrap {
+      display: flex;
+      align-items: center;
+      gap: 0.6rem;
+    }
+
+    #whisper-bar-track {
+      flex: 1;
+      height: 6px;
+      background: var(--border);
+      border-radius: 99px;
+      overflow: hidden;
+    }
+
+    #whisper-bar-fill {
+      height: 100%;
+      width: 0%;
+      background: linear-gradient(90deg, #6c63ff, #a78bfa);
+      border-radius: 99px;
+      transition: width 0.4s ease;
+    }
+
+    /* Indeterminate: shimmer sweeping left→right */
+    #whisper-bar-fill.indeterminate {
+      width: 100% !important;
+      transition: none;
+      background: linear-gradient(90deg,
+        transparent 0%,
+        #6c63ff 30%,
+        #a78bfa 50%,
+        #6c63ff 70%,
+        transparent 100%
+      );
+      background-size: 200% 100%;
+      animation: shimmer 1.6s linear infinite;
+    }
+
+    @keyframes shimmer {
+      0%   { background-position: 200% 0; }
+      100% { background-position: -200% 0; }
+    }
+
+    #whisper-pct-label {
+      font-size: 0.78rem;
+      color: var(--text-muted);
+      min-width: 2.8rem;
+      text-align: right;
+    }
+
+    /* Error banner */
+    #error-banner {
+      background: rgba(248, 113, 113, 0.12);
+      border: 1px solid var(--red);
+      border-radius: var(--radius);
+      padding: 0.85rem 1rem;
+      color: var(--red);
+      font-size: 0.9rem;
+    }
+
+    /* Spoilers */
+    details {
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      overflow: hidden;
+      animation: fadeIn 0.3s ease;
+    }
+
+    @keyframes fadeIn {
+      from { opacity: 0; transform: translateY(6px); }
+      to   { opacity: 1; transform: translateY(0); }
+    }
+
+    details > summary {
+      list-style: none;
+      cursor: pointer;
+      padding: 0.9rem 1.1rem;
+      font-weight: 600;
+      font-size: 0.95rem;
+      display: flex;
+      align-items: center;
+      gap: 0.6rem;
+      user-select: none;
+      transition: background 0.15s;
+    }
+
+    details > summary::-webkit-details-marker { display: none; }
+
+    details > summary:hover { background: rgba(255,255,255,0.03); }
+
+    details > summary::before {
+      content: '▶';
+      font-size: 0.65rem;
+      color: var(--accent);
+      transition: transform 0.2s;
+      flex-shrink: 0;
+    }
+
+    details[open] > summary::before { transform: rotate(90deg); }
+
+    .badge {
+      margin-left: auto;
+      font-size: 0.72rem;
+      font-weight: 500;
+      color: var(--text-muted);
+      background: var(--border);
+      padding: 0.2rem 0.55rem;
+      border-radius: 20px;
+    }
+
+    .badge.done {
+      color: var(--green);
+      background: rgba(74, 222, 128, 0.12);
+    }
+
+    .spoiler-body {
+      padding: 0 1.1rem 1.1rem;
+      border-top: 1px solid var(--border);
+    }
+
+    pre {
+      white-space: pre-wrap;
+      word-break: break-word;
+      font-family: 'Consolas', 'Cascadia Code', monospace;
+      font-size: 0.82rem;
+      line-height: 1.6;
+      color: #c9cfe0;
+      padding-top: 0.9rem;
+    }
+
+    .summary-content {
+      padding-top: 0.9rem;
+      font-size: 0.92rem;
+      line-height: 1.7;
+    }
+
+    .summary-content strong { color: #c4b5fd; }
+
+    .summary-content ul {
+      margin: 0.4rem 0 0.4rem 1.4rem;
+    }
+
+    .summary-content li { margin-bottom: 0.25rem; }
+  </style>
+</head>
+<body>
+  <main>
+    <h1>Video / Audio Summarizer</h1>
+
+    <div class="upload-card">
+      <form id="upload-form">
+        <div class="file-row">
+          <input type="file" id="file-input" accept="video/*,audio/*" required />
+          <button type="submit" id="submit-btn">Суммаризировать</button>
+        </div>
+      </form>
+
+      <div id="progress" style="display:none">
+        <div class="progress-top">
+          <div class="spinner"></div>
+          <span id="status-msg">Запуск...</span>
+        </div>
+        <div id="whisper-progress-wrap" style="display:none">
+          <div id="whisper-bar-track">
+            <div id="whisper-bar-fill"></div>
+          </div>
+          <span id="whisper-pct-label">0%</span>
+        </div>
+      </div>
+    </div>
+
+    <div id="error-banner" style="display:none"></div>
+
+    <!-- Spoiler 1: FFmpeg -->
+    <details id="spoiler-ffmpeg" style="display:none">
+      <summary>
+        Конвертация (FFmpeg)
+        <span class="badge" id="badge-ffmpeg">...</span>
+      </summary>
+      <div class="spoiler-body">
+        <pre id="content-ffmpeg"></pre>
+      </div>
+    </details>
+
+    <!-- Spoiler 2: Raw transcript -->
+    <details id="spoiler-transcript" style="display:none">
+      <summary>
+        Сырая транскрипция (Whisper)
+        <span class="badge" id="badge-transcript">...</span>
+      </summary>
+      <div class="spoiler-body">
+        <pre id="content-transcript"></pre>
+      </div>
+    </details>
+
+    <!-- Spoiler 3: Cleaned transcript -->
+    <details id="spoiler-cleaned" style="display:none">
+      <summary>
+        Очищенная транскрипция (Gemma)
+        <span class="badge" id="badge-cleaned">...</span>
+      </summary>
+      <div class="spoiler-body">
+        <pre id="content-cleaned"></pre>
+      </div>
+    </details>
+
+    <!-- Spoiler 4: Summary -->
+    <details id="spoiler-summary" style="display:none">
+      <summary>
+        Саммари (Gemma)
+        <span class="badge" id="badge-summary">...</span>
+      </summary>
+      <div class="spoiler-body">
+        <div class="summary-content" id="content-summary"></div>
+      </div>
+    </details>
+  </main>
+
+  <script>
+    const form = document.getElementById('upload-form');
+    const fileInput = document.getElementById('file-input');
+    const submitBtn = document.getElementById('submit-btn');
+    const progressEl = document.getElementById('progress');
+    const statusMsg = document.getElementById('status-msg');
+    const errorBanner = document.getElementById('error-banner');
+
+    const whisperWrap = document.getElementById('whisper-progress-wrap');
+    const whisperFill = document.getElementById('whisper-bar-fill');
+    const whisperPct  = document.getElementById('whisper-pct-label');
+
+    function resetUI() {
+      errorBanner.style.display = 'none';
+      errorBanner.textContent = '';
+      ['ffmpeg', 'transcript', 'cleaned', 'summary'].forEach(id => {
+        const el = document.getElementById('spoiler-' + id);
+        el.style.display = 'none';
+        el.removeAttribute('open');
+        document.getElementById('badge-' + id).className = 'badge';
+        document.getElementById('badge-' + id).textContent = '...';
+      });
+      document.getElementById('content-ffmpeg').textContent = '';
+      document.getElementById('content-transcript').textContent = '';
+      document.getElementById('content-cleaned').textContent = '';
+      document.getElementById('content-summary').innerHTML = '';
+      whisperWrap.style.display = 'none';
+      whisperFill.classList.remove('indeterminate');
+      whisperFill.style.width = '0%';
+      whisperPct.textContent = '0%';
+    }
+
+    function startWhisperIndeterminate() {
+      whisperWrap.style.display = 'flex';
+      whisperFill.classList.add('indeterminate');
+      whisperPct.textContent = '...';
+    }
+
+    function setWhisperProgress(pct) {
+      whisperWrap.style.display = 'flex';
+      whisperFill.classList.remove('indeterminate');
+      whisperFill.style.width = pct + '%';
+      whisperPct.textContent = pct + '%';
+    }
+
+    function showProgress(visible) {
+      progressEl.style.display = visible ? 'flex' : 'none';
+      submitBtn.disabled = visible;
+    }
+
+    function setStatus(msg) {
+      statusMsg.textContent = msg;
+    }
+
+    function showSpoiler(id, content, isHTML = false) {
+      const el = document.getElementById('spoiler-' + id);
+      el.style.display = '';
+      const badge = document.getElementById('badge-' + id);
+      badge.className = 'badge done';
+      badge.textContent = 'готово';
+
+      if (isHTML) {
+        document.getElementById('content-' + id).innerHTML = content;
+      } else {
+        document.getElementById('content-' + id).textContent = content;
+      }
+    }
+
+    function renderMarkdown(text) {
+      // Bold: **text**
+      let html = text.replace(/\*\*(.*?)\*\*/g, '<strong>$1</strong>');
+      // Numbered headers like "1. **Topic**:" → already handled by bold above
+      // Bullet lists: lines starting with "- " or "* "
+      const lines = html.split('\n');
+      const result = [];
+      let inList = false;
+
+      for (const line of lines) {
+        const bulletMatch = line.match(/^[-*]\s+(.+)$/);
+        if (bulletMatch) {
+          if (!inList) { result.push('<ul>'); inList = true; }
+          result.push('<li>' + bulletMatch[1] + '</li>');
+        } else {
+          if (inList) { result.push('</ul>'); inList = false; }
+          result.push(line ? '<p>' + line + '</p>' : '');
+        }
+      }
+      if (inList) result.push('</ul>');
+
+      return result.join('\n');
+    }
+
+    function handleEvent(event, payload) {
+      switch (event) {
+        case 'status':
+          setStatus(payload.message);
+          if (payload.message.toLowerCase().includes('whisper')) {
+            startWhisperIndeterminate();
+          }
+          break;
+
+        case 'ffmpeg_done':
+          showSpoiler('ffmpeg', payload.file_info);
+          break;
+
+        case 'transcript_progress':
+          setWhisperProgress(payload.pct);
+          break;
+
+        case 'transcript_done':
+          setWhisperProgress(100);
+          whisperWrap.style.display = 'none';
+          showSpoiler('transcript', payload.text);
+          break;
+
+        case 'cleaned_done':
+          showSpoiler('cleaned', payload.text);
+          break;
+
+        case 'summary_done': {
+          const html = renderMarkdown(payload.text);
+          showSpoiler('summary', html, true);
+          // Auto-open summary — most important result
+          document.getElementById('spoiler-summary').setAttribute('open', '');
+          break;
+        }
+
+        case 'error':
+          errorBanner.style.display = '';
+          errorBanner.textContent = `Ошибка на стадии "${payload.stage}": ${payload.message}`;
+          showProgress(false);
+          break;
+      }
+    }
+
+    form.addEventListener('submit', async (e) => {
+      e.preventDefault();
+      if (!fileInput.files.length) return;
+
+      resetUI();
+      showProgress(true);
+      setStatus('Загрузка файла...');
+
+      const formData = new FormData();
+      formData.append('file', fileInput.files[0]);
+
+      let response;
+      try {
+        response = await fetch('/process', { method: 'POST', body: formData });
+      } catch (err) {
+        errorBanner.style.display = '';
+        errorBanner.textContent = 'Не удалось подключиться к серверу: ' + err.message;
+        showProgress(false);
+        return;
+      }
+
+      if (!response.ok) {
+        errorBanner.style.display = '';
+        errorBanner.textContent = 'Ошибка сервера: ' + response.status;
+        showProgress(false);
+        return;
+      }
+
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = '';
+
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          buffer += decoder.decode(value, { stream: true });
+
+          // SSE messages are separated by \n\n
+          const parts = buffer.split('\n\n');
+          buffer = parts.pop(); // last incomplete chunk stays in buffer
+
+          for (const part of parts) {
+            for (const line of part.split('\n')) {
+              const trimmed = line.trim();
+              if (trimmed.startsWith('data: ')) {
+                try {
+                  const msg = JSON.parse(trimmed.slice(6));
+                  handleEvent(msg.event, msg.payload);
+                } catch (_) {
+                  // malformed JSON — ignore
+                }
+              }
+            }
+          }
+        }
+      } finally {
+        showProgress(false);
+      }
+    });
+  </script>
+</body>
+</html>
