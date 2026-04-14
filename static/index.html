@@ -61,12 +61,38 @@
       gap: 1rem;
     }
 
+    .field-label {
+      font-size: 0.82rem;
+      font-weight: 600;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      margin-bottom: 0.3rem;
+    }
+
     .file-row {
       display: flex;
       gap: 0.75rem;
       align-items: center;
       flex-wrap: wrap;
     }
+
+    textarea#chat-input {
+      width: 100%;
+      min-height: 130px;
+      resize: vertical;
+      background: var(--bg);
+      border: 1px solid var(--border);
+      border-radius: 6px;
+      color: var(--text);
+      padding: 0.65rem 0.75rem;
+      font-size: 0.88rem;
+      font-family: inherit;
+      line-height: 1.55;
+    }
+
+    textarea#chat-input::placeholder { color: var(--text-muted); }
+    textarea#chat-input:focus { outline: none; border-color: var(--accent); }
 
     input[type="file"] {
       flex: 1;
@@ -286,8 +312,27 @@
 
     <div class="upload-card">
       <form id="upload-form">
-        <div class="file-row">
-          <input type="file" id="file-input" accept="video/*,audio/*" required />
+        <div style="margin-bottom:0.75rem">
+          <div class="field-label">Video / Audio (optional)</div>
+          <div class="file-row">
+            <input type="file" id="file-input" accept="video/*,audio/*" />
+            <select id="lang-select" style="background:var(--bg);border:1px solid var(--border);border-radius:6px;color:var(--text);padding:0.55rem 0.75rem;font-size:0.9rem;cursor:pointer;">
+              <option value="ru">Russian</option>
+              <option value="uk">Ukrainian</option>
+              <option value="en">English</option>
+              <option value="de">German</option>
+              <option value="fr">French</option>
+              <option value="es">Spanish</option>
+            </select>
+          </div>
+        </div>
+
+        <div>
+          <div class="field-label">Chat messages (optional) — paste WhatsApp text</div>
+          <textarea id="chat-input" placeholder="Paste chat text here…"></textarea>
+        </div>
+
+        <div style="margin-top:0.75rem">
           <button type="submit" id="submit-btn">Суммаризировать</button>
         </div>
       </form>
@@ -351,11 +396,19 @@
         <div class="summary-content" id="content-summary"></div>
       </div>
     </details>
+
+    <!-- Short summary card (~10% of summary) -->
+    <div id="tldr-card" style="display:none; background:var(--surface); border:1px solid var(--accent); border-radius:var(--radius); padding:1.1rem 1.3rem; animation: fadeIn 0.3s ease;">
+      <div style="font-size:0.75rem;font-weight:700;color:var(--accent);text-transform:uppercase;letter-spacing:0.07em;margin-bottom:0.5rem;">Краткое саммари</div>
+      <div id="content-tldr" class="summary-content"></div>
+    </div>
   </main>
 
   <script>
     const form = document.getElementById('upload-form');
     const fileInput = document.getElementById('file-input');
+    const langSelect = document.getElementById('lang-select');
+    const chatInput = document.getElementById('chat-input');
     const submitBtn = document.getElementById('submit-btn');
     const progressEl = document.getElementById('progress');
     const statusMsg = document.getElementById('status-msg');
@@ -379,6 +432,10 @@
       document.getElementById('content-transcript').textContent = '';
       document.getElementById('content-cleaned').textContent = '';
       document.getElementById('content-summary').innerHTML = '';
+      document.getElementById('tldr-card').style.display = 'none';
+      document.getElementById('content-tldr').textContent = '';
+      // hide transcript spoiler if no video was submitted
+      document.getElementById('spoiler-transcript').style.display = 'none';
       whisperWrap.style.display = 'none';
       whisperFill.classList.remove('indeterminate');
       whisperFill.style.width = '0%';
@@ -449,7 +506,7 @@
       switch (event) {
         case 'status':
           setStatus(payload.message);
-          if (payload.message.toLowerCase().includes('whisper')) {
+          if (payload.message.toLowerCase().includes('canary')) {
             startWhisperIndeterminate();
           }
           break;
@@ -480,6 +537,13 @@
           break;
         }
 
+        case 'tldr_done': {
+          const card = document.getElementById('tldr-card');
+          card.style.display = '';
+          document.getElementById('content-tldr').innerHTML = renderMarkdown(payload.text);
+          break;
+        }
+
         case 'error':
           errorBanner.style.display = '';
           errorBanner.textContent = `Ошибка на стадии "${payload.stage}": ${payload.message}`;
@@ -490,14 +554,22 @@
 
     form.addEventListener('submit', async (e) => {
       e.preventDefault();
-      if (!fileInput.files.length) return;
+      const hasFile = fileInput.files.length > 0;
+      const hasChat = chatInput.value.trim().length > 0;
+      if (!hasFile && !hasChat) {
+        errorBanner.style.display = '';
+        errorBanner.textContent = 'Add a video/audio file or paste chat text (or both).';
+        return;
+      }
 
       resetUI();
       showProgress(true);
-      setStatus('Загрузка файла...');
+      setStatus('Загрузка...');
 
       const formData = new FormData();
-      formData.append('file', fileInput.files[0]);
+      if (hasFile) formData.append('file', fileInput.files[0]);
+      formData.append('chat_text', chatInput.value);
+      formData.append('source_lang', langSelect.value);
 
       let response;
       try {

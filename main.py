@@ -6,19 +6,26 @@ import shutil
 import subprocess
 import tempfile
 import time
+from pathlib import Path
 
+import torch
 from dotenv import load_dotenv
 
 load_dotenv()
 
-# Pass HF token so faster-whisper can download gated models without rate limits
-_hf_token = os.environ.get("HF_TOKEN")
+# Pass HF token so NeMo/HuggingFace can download gated models without rate limits
+_hf_token = (
+    os.environ.get("HUGGING_FACE_HUB_TOKEN")
+    or os.environ.get("HF_TOKEN")
+    or os.environ.get("HUGGINGFACE_HUB_TOKEN")
+)
 if _hf_token:
     os.environ.setdefault("HUGGING_FACE_HUB_TOKEN", _hf_token)
+    os.environ.setdefault("HF_TOKEN", _hf_token)
+    os.environ.setdefault("HUGGINGFACE_HUB_TOKEN", _hf_token)
 
 import httpx
-from faster_whisper import WhisperModel
-from fastapi import FastAPI, File, UploadFile
+from fastapi import FastAPI, File, Form, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
@@ -37,62 +44,77 @@ log = logging.getLogger("summarizer")
 # Configuration
 # ---------------------------------------------------------------------------
 
-OLLAMA_URL = "http://localhost:11434/api/generate"
+def _ollama_base_url() -> str:
+    """Resolve Ollama host. Supports OLLAMA_BASE_URL or OLLAMA_HOST env override.
+    Default: Windows host gateway so this works from WSL2."""
+    host = os.environ.get("OLLAMA_BASE_URL") or os.environ.get("OLLAMA_HOST")
+    if host:
+        return host.rstrip("/")
+    # In WSL2 the Windows host sits at the default route gateway
+    try:
+        import subprocess as _sp
+        gw = _sp.check_output(
+            ["ip", "route", "show", "default"], text=True
+        ).split()[2]
+        return f"http://{gw}:11434"
+    except Exception:
+        return "http://localhost:11434"
+
+
+OLLAMA_URL = _ollama_base_url() + "/api/generate"
 OLLAMA_MODEL = "gemma4:e4b"
 MAX_UPLOAD_BYTES = 500 * 1024 * 1024  # 500 MB
 
-# Whisper model loaded once at startup (thread-safe for concurrent reads)
-# CUDA DLLs are loaded lazily on first .transcribe() call, so we do a dummy
-# encode to catch missing cublas/cudnn early and fall back to CPU if needed.
-log.info("Loading Whisper model...")
+CANARY_MODEL = "nvidia/canary-1b-v2"
+
+# ---------------------------------------------------------------------------
+# NeMo Canary model — loaded once at startup
+# ---------------------------------------------------------------------------
+
+log.info("Loading NeMo Canary model...")
 
 
-CUDA_MODEL = "large-v3"
-CPU_MODEL = "base"
-HF_REPO_CUDA = f"Systran/faster-whisper-{CUDA_MODEL}"
-HF_REPO_CPU = f"Systran/faster-whisper-{CPU_MODEL}"
+def _choose_device() -> str:
+    return "cuda" if torch.cuda.is_available() else "cpu"
 
 
-def _download_model(repo_id: str) -> None:
-    """Download all model files from HuggingFace with per-file progress logging."""
-    from huggingface_hub import hf_hub_download, list_repo_files
+def _load_canary():
+    import requests as _requests
+    from nemo.collections.asr.models import ASRModel
 
-    token = _hf_token or None
-    log.info("  [hf] checking %s ...", repo_id)
-    files = list(list_repo_files(repo_id, token=token))
-    log.info("  [hf] %d file(s) to fetch:", len(files))
-    for f in files:
-        log.info("  [hf]   %s", f)
+    device = _choose_device()
+    log.info("  [canary] device: %s", device)
 
-    for i, filename in enumerate(files, 1):
-        log.info("  [hf] [%d/%d] %s ...", i, len(files), filename)
-        path = hf_hub_download(repo_id=repo_id, filename=filename, token=token)
-        size_mb = os.path.getsize(path) / 1024 / 1024
-        log.info("  [hf] [%d/%d] done — %.1f MB", i, len(files), size_mb)
+    if not _hf_token:
+        log.warning(
+            "No HuggingFace token found. If the model is gated set HF_TOKEN in .env."
+        )
 
-    log.info("  [hf] all files ready.")
-
-
-def _load_whisper() -> WhisperModel:
-    import numpy as np
-
+    model_ref = Path(CANARY_MODEL).expanduser()
     try:
-        _download_model(HF_REPO_CUDA)
-        m = WhisperModel(CUDA_MODEL, device="cuda", compute_type="float16")
-        # Warm-up: feature_extractor is CPU-only; encode() is what loads cublas
-        mel = m.feature_extractor(np.zeros(16000, dtype=np.float32))
-        m.encode(mel)  # forces cublas64_12.dll / cudnn to load right now
-        log.info("Whisper model ready (CUDA).")
-        return m
-    except Exception as e:
-        log.warning("CUDA unavailable (%s), falling back to CPU.", e)
-        _download_model(HF_REPO_CPU)
-        m = WhisperModel(CPU_MODEL, device="cpu", compute_type="int8")
-        log.info("Whisper model ready (CPU).")
-        return m
+        if model_ref.exists():
+            model = ASRModel.restore_from(restore_path=str(model_ref.resolve()))
+        else:
+            model = ASRModel.from_pretrained(model_name=CANARY_MODEL)
+    except _requests.exceptions.RequestException as exc:
+        log.error(
+            "Failed to download Canary model. Pass a local .nemo file via CANARY_MODEL "
+            "env var or ensure network access. Error: %s",
+            exc,
+        )
+        raise SystemExit(2) from exc
+
+    if device == "cuda":
+        model = model.cuda()
+    else:
+        model = model.cpu()
+
+    log.info("Canary model ready (%s).", device.upper())
+    return model
 
 
-whisper_model = _load_whisper()
+canary_model = _load_canary()
+_canary_device = _choose_device()
 
 # ---------------------------------------------------------------------------
 # Prompts
@@ -117,17 +139,30 @@ CLEAN_PROMPT_TEMPLATE = "Clean and correct the following raw transcript:\n\n{tra
 SUMMARY_SYSTEM = (
     "You are an expert content summarizer. "
     "Create clear, structured summaries that capture the key information. "
-    "IMPORTANT: Always respond in the same language as the transcript."
+    "IMPORTANT: Always respond in the same language as the input."
 )
 
 SUMMARY_PROMPT_TEMPLATE = (
-    "Based on the following transcript, provide a comprehensive summary in the SAME LANGUAGE as the transcript. "
+    "Based on the following content, provide a comprehensive summary in the SAME LANGUAGE as the input. "
     "The summary must include:\n\n"
     "1. **Main Topic**: What this content is about in 1-2 sentences\n"
     "2. **Key Points**: The most important points covered (bullet list)\n"
     "3. **Details**: Relevant supporting information or context\n"
     "4. **Conclusion**: Main takeaway or outcome\n\n"
-    "Transcript:\n{transcript}"
+    "Content:\n{transcript}"
+)
+
+SHORT_SUMMARY_PROMPT_TEMPLATE = (
+    "Write a structured short summary of the following content. "
+    "The summary should be approximately 10% of the length of the full content.\n\n"
+    "If the content is about a problem someone is trying to solve (e.g. a call, meeting, or discussion), structure the summary as:\n"
+    "- **Problem**: what issue is being addressed\n"
+    "- **Ways to solve**: approaches or actions taken/proposed\n"
+    "- **Blockers**: obstacles preventing resolution\n"
+    "- **Estimated resolution**: timeframe or next steps if mentioned\n\n"
+    "If the content is not about solving a problem, write a plain structured summary covering the key points.\n\n"
+    "Use the SAME LANGUAGE as the input. Output only the summary, no commentary.\n\n"
+    "Content:\n{transcript}"
 )
 
 # ---------------------------------------------------------------------------
@@ -185,28 +220,33 @@ def convert_to_wav(input_path: str, output_path: str) -> dict:
     }
 
 
-def transcribe_with_progress(
+def transcribe_with_canary(
     wav_path: str,
-    model: WhisperModel,
+    model,
     async_q: asyncio.Queue,
     loop: asyncio.AbstractEventLoop,
+    source_lang: str = "en",
+    target_lang: str = "en",
 ) -> str:
-    """Transcribe WAV using faster-whisper, pushing progress % into an asyncio.Queue via call_soon_threadsafe."""
-    segments, info = model.transcribe(wav_path, beam_size=5)
-    total = info.duration or 1.0
-    texts = []
-    last_logged_pct = -1
-    for segment in segments:
-        texts.append(segment.text.strip())
-        pct = min(int(segment.end / total * 100), 99)
-        loop.call_soon_threadsafe(async_q.put_nowait, pct)
-        # Log every 10%
-        bucket = (pct // 10) * 10
-        if bucket > last_logged_pct:
-            last_logged_pct = bucket
-            log.info("  [whisper] %d%%", bucket)
+    """Transcribe WAV using NeMo Canary (full file, single pass)."""
+    log.info("  [canary] starting inference (this may take several minutes)...")
+    loop.call_soon_threadsafe(async_q.put_nowait, 1)  # show bar immediately
+
+    try:
+        outputs = model.transcribe(
+            audio=[wav_path],
+            source_lang=source_lang,
+            target_lang=target_lang,
+        )
+    except Exception:
+        log.exception("  [canary] inference failed")
+        raise
+
     loop.call_soon_threadsafe(async_q.put_nowait, None)  # sentinel
-    return " ".join(texts)
+
+    if outputs:
+        return getattr(outputs[0], "text", str(outputs[0]))
+    return ""
 
 
 def call_ollama(prompt: str, system: str = "") -> str:
@@ -219,7 +259,7 @@ def call_ollama(prompt: str, system: str = "") -> str:
             "system": system,
             "stream": False,
         },
-        timeout=300.0,
+        timeout=900.0,
     )
     response.raise_for_status()
     return response.json()["response"]
@@ -244,82 +284,101 @@ LOCAL_TMP = os.path.join(BASE_DIR, "tmp")
 os.makedirs(LOCAL_TMP, exist_ok=True)
 
 
-async def process_generator(file: UploadFile):
+def combine_sources(transcript: str, chat: str) -> str:
+    """Merge video transcript and chat text into a single unified source."""
+    parts = []
+    if transcript.strip():
+        parts.append(f"=== Video/Audio Transcript ===\n{transcript.strip()}")
+    if chat.strip():
+        parts.append(f"=== Chat Messages ===\n{chat.strip()}")
+    return "\n\n".join(parts)
+
+
+async def process_generator(file: UploadFile | None, chat_text: str, source_lang: str = "ru"):
+    if not file and not chat_text.strip():
+        yield sse("error", {"message": "Provide a video/audio file or chat text (or both).", "stage": "upload"})
+        return
+
     tmp_dir = tempfile.mkdtemp(dir=LOCAL_TMP)
-    # Sanitize filename to avoid path traversal
-    safe_filename = os.path.basename(file.filename or "upload")
-    input_path = os.path.join(tmp_dir, safe_filename)
-    wav_path = os.path.join(tmp_dir, "audio.wav")
     total_start = time.monotonic()
+    raw_transcript = ""
 
     try:
-        # Save uploaded file
-        content = await file.read()
-        size_mb = len(content) / (1024 * 1024)
-
-        if len(content) > MAX_UPLOAD_BYTES:
-            log.error("  [upload] ERROR: file exceeds 500 MB limit (%.1f MB)", size_mb)
-            yield sse("error", {"message": "File exceeds 500 MB limit.", "stage": "upload"})
-            return
-
-        log.info("► [%s] Start — %.1f MB", safe_filename, size_mb)
-
-        with open(input_path, "wb") as f:
-            f.write(content)
-
         loop = asyncio.get_event_loop()
 
-        # Stage 1: FFmpeg conversion
-        yield sse("status", {"message": "Converting media with FFmpeg..."})
-        log.info("  [ffmpeg] converting...")
-        t0 = time.monotonic()
-        try:
-            meta = await loop.run_in_executor(None, convert_to_wav, input_path, wav_path)
-        except FileNotFoundError:
-            log.error("  [ffmpeg] ERROR: ffprobe/ffmpeg not found in PATH")
-            yield sse("error", {
-                "message": "ffprobe/ffmpeg не найден. Установите FFmpeg и добавьте в системный PATH.",
-                "stage": "ffmpeg",
-            })
-            return
-        except subprocess.CalledProcessError as exc:
-            stderr = exc.stderr.decode(errors="replace") if exc.stderr else ""
-            log.error("  [ffmpeg] ERROR: %s", stderr[:300])
-            yield sse("error", {"message": f"FFmpeg error: {stderr[:500]}", "stage": "ffmpeg"})
-            return
-        log.info("  [ffmpeg] done — %s, %s  (%.2fs)", meta["format"], meta["duration"], time.monotonic() - t0)
-        yield sse("ffmpeg_done", meta)
+        # Stage 1 + 2: video pipeline (skipped if no file uploaded)
+        if file and file.filename:
+            safe_filename = os.path.basename(file.filename)
+            input_path = os.path.join(tmp_dir, safe_filename)
+            wav_path = os.path.join(tmp_dir, "audio.wav")
 
-        # Stage 2: Whisper transcription with progress
-        yield sse("status", {"message": "Transcribing audio with Whisper..."})
-        log.info("  [whisper] transcribing...")
-        t0 = time.monotonic()
-        try:
-            async_q: asyncio.Queue = asyncio.Queue()
-            future = loop.run_in_executor(
-                None, transcribe_with_progress, wav_path, whisper_model, async_q, loop
-            )
-            # Drain progress events from the async queue until sentinel (None)
-            while True:
-                pct = await async_q.get()
-                if pct is None:
-                    break
-                yield sse("transcript_progress", {"pct": pct})
-            raw_text = await future
-        except Exception as exc:
-            log.error("  [whisper] ERROR: %s", exc)
-            yield sse("error", {"message": f"Whisper error: {exc}", "stage": "whisper"})
-            return
-        log.info("  [whisper] done — %d chars  (%.2fs)", len(raw_text), time.monotonic() - t0)
-        yield sse("transcript_progress", {"pct": 100})
-        yield sse("transcript_done", {"text": raw_text})
+            content = await file.read()
+            size_mb = len(content) / (1024 * 1024)
+
+            if len(content) > MAX_UPLOAD_BYTES:
+                log.error("  [upload] ERROR: file exceeds 500 MB limit (%.1f MB)", size_mb)
+                yield sse("error", {"message": "File exceeds 500 MB limit.", "stage": "upload"})
+                return
+
+            log.info("► [%s] Start — %.1f MB", safe_filename, size_mb)
+            with open(input_path, "wb") as f:
+                f.write(content)
+
+            # Stage 1: FFmpeg conversion
+            yield sse("status", {"message": "Converting media with FFmpeg..."})
+            log.info("  [ffmpeg] converting...")
+            t0 = time.monotonic()
+            try:
+                meta = await loop.run_in_executor(None, convert_to_wav, input_path, wav_path)
+            except FileNotFoundError:
+                log.error("  [ffmpeg] ERROR: ffprobe/ffmpeg not found in PATH")
+                yield sse("error", {
+                    "message": "ffprobe/ffmpeg not found. Install FFmpeg and add to PATH.",
+                    "stage": "ffmpeg",
+                })
+                return
+            except subprocess.CalledProcessError as exc:
+                stderr = exc.stderr.decode(errors="replace") if exc.stderr else ""
+                log.error("  [ffmpeg] ERROR: %s", stderr[:300])
+                yield sse("error", {"message": f"FFmpeg error: {stderr[:500]}", "stage": "ffmpeg"})
+                return
+            log.info("  [ffmpeg] done — %s, %s  (%.2fs)", meta["format"], meta["duration"], time.monotonic() - t0)
+            yield sse("ffmpeg_done", meta)
+
+            # Stage 2: Canary transcription
+            yield sse("status", {"message": "Transcribing audio with Canary (may take a few minutes)..."})
+            log.info("  [canary] transcribing...")
+            t0 = time.monotonic()
+            try:
+                async_q: asyncio.Queue = asyncio.Queue()
+                future = loop.run_in_executor(
+                    None, transcribe_with_canary, wav_path, canary_model, async_q, loop, source_lang, source_lang
+                )
+                while True:
+                    pct = await async_q.get()
+                    if pct is None:
+                        break
+                    yield sse("transcript_progress", {"pct": pct})
+                raw_transcript = await future
+            except Exception as exc:
+                log.error("  [canary] ERROR: %s", exc)
+                yield sse("error", {"message": f"Canary error: {exc}", "stage": "whisper"})
+                return
+            log.info("  [canary] done — %d chars  (%.2fs)", len(raw_transcript), time.monotonic() - t0)
+            yield sse("transcript_progress", {"pct": 100})
+            yield sse("transcript_done", {"text": raw_transcript})
+        else:
+            log.info("► No video file — chat-only mode")
+
+        # Combine transcript + chat into one source for LLM stages
+        combined = combine_sources(raw_transcript, chat_text)
 
         # Stage 3: Clean with Gemma
-        yield sse("status", {"message": "Cleaning transcript with Gemma..."})
+        yield sse("status", {"message": "Cleaning content with Gemma..."})
         log.info("  [gemma/clean] calling ollama...")
         t0 = time.monotonic()
         try:
-            clean_prompt = CLEAN_PROMPT_TEMPLATE.format(transcript=raw_text)
+            clean_prompt = CLEAN_PROMPT_TEMPLATE.format(transcript=combined)
             cleaned_text = await loop.run_in_executor(
                 None, call_ollama, clean_prompt, CLEAN_SYSTEM
             )
@@ -346,7 +405,23 @@ async def process_generator(file: UploadFile):
         log.info("  [gemma/summary] done  (%.2fs)", time.monotonic() - t0)
         yield sse("summary_done", {"text": summary_text})
 
-        log.info("◄ [%s] Complete — total %.2fs", safe_filename, time.monotonic() - total_start)
+        # Stage 5: Short TL;DR summary
+        yield sse("status", {"message": "Generating short TL;DR with Gemma..."})
+        log.info("  [gemma/tldr] calling ollama...")
+        t0 = time.monotonic()
+        try:
+            tldr_prompt = SHORT_SUMMARY_PROMPT_TEMPLATE.format(transcript=cleaned_text)
+            tldr_text = await loop.run_in_executor(
+                None, call_ollama, tldr_prompt, SUMMARY_SYSTEM
+            )
+        except Exception as exc:
+            log.error("  [gemma/tldr] ERROR: %s", exc)
+            yield sse("error", {"message": f"Ollama (tldr) error: {exc}", "stage": "tldr"})
+            return
+        log.info("  [gemma/tldr] done  (%.2fs)", time.monotonic() - t0)
+        yield sse("tldr_done", {"text": tldr_text})
+
+        log.info("◄ Complete — total %.2fs", time.monotonic() - total_start)
 
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
@@ -367,9 +442,13 @@ async def root():
 
 
 @app.post("/process")
-async def process_media(file: UploadFile = File(...)):
+async def process_media(
+    file: UploadFile | None = File(default=None),
+    chat_text: str = Form(default=""),
+    source_lang: str = Form(default="ru"),
+):
     return StreamingResponse(
-        process_generator(file),
+        process_generator(file, chat_text, source_lang),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache",
