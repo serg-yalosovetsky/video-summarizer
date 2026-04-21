@@ -37,8 +37,8 @@ log = logging.getLogger("summarizer")
 # Configuration
 # ---------------------------------------------------------------------------
 
-OLLAMA_URL = "http://localhost:11434/api/generate"
-OLLAMA_MODEL = "gemma4:e4b"
+OLLAMA_URL = os.environ.get("OLLAMA_URL", "http://localhost:11434/api/generate")
+OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "gemma4:e4b")
 MAX_UPLOAD_BYTES = 500 * 1024 * 1024  # 500 MB
 
 # Whisper model loaded once at startup (thread-safe for concurrent reads)
