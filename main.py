@@ -47,22 +47,25 @@ log = logging.getLogger("summarizer")
 def _ollama_base_url() -> str:
     """Resolve Ollama host. Supports OLLAMA_BASE_URL or OLLAMA_HOST env override.
     Default: Windows host gateway so this works from WSL2."""
-    host = os.environ.get("OLLAMA_BASE_URL") or os.environ.get("OLLAMA_HOST")
+    host = os.environ.get("OLLAMA_BASE_URL") or os.environ.get("OLLAMA_HOST") or os.environ.get("OLLAMA_URL")
     if host:
-        return host.rstrip("/")
+        # If it's a full URL (contains /api/), return as-is; otherwise append /api/generate
+        if "/api/" in host:
+            return host
+        return host.rstrip("/") + "/api/generate"
     # In WSL2 the Windows host sits at the default route gateway
     try:
         import subprocess as _sp
         gw = _sp.check_output(
             ["ip", "route", "show", "default"], text=True
         ).split()[2]
-        return f"http://{gw}:11434"
+        return f"http://{gw}:11434/api/generate"
     except Exception:
-        return "http://localhost:11434"
+        return "http://localhost:11434/api/generate"
 
 
-OLLAMA_URL = _ollama_base_url() + "/api/generate"
-OLLAMA_MODEL = "gemma4:e4b"
+OLLAMA_URL = _ollama_base_url()
+OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "gemma4:e4b")
 MAX_UPLOAD_BYTES = 500 * 1024 * 1024  # 500 MB
 
 CANARY_MODEL = "nvidia/canary-1b-v2"
@@ -76,6 +79,14 @@ log.info("Loading NeMo Canary model...")
 
 def _choose_device() -> str:
     return "cuda" if torch.cuda.is_available() else "cpu"
+
+
+def _tail_text(text: str, limit: int = 500) -> str:
+    """Return the last significant part of subprocess output."""
+    cleaned = (text or "").strip()
+    if len(cleaned) <= limit:
+        return cleaned
+    return cleaned[-limit:]
 
 
 def _load_canary():
@@ -174,12 +185,19 @@ def convert_to_wav(input_path: str, output_path: str) -> dict:
     """Convert any audio/video to 16 kHz mono WAV. Returns metadata dict."""
     # Probe input file metadata
     probe_cmd = [
-        "ffprobe", "-v", "quiet",
+        "ffprobe", "-v", "error",
         "-print_format", "json",
         "-show_streams", "-show_format",
         input_path,
     ]
-    probe_result = subprocess.run(probe_cmd, capture_output=True, check=True)
+    probe_result = subprocess.run(
+        probe_cmd,
+        capture_output=True,
+        check=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
     probe_data = json.loads(probe_result.stdout)
 
     fmt = probe_data.get("format", {})
@@ -190,10 +208,15 @@ def convert_to_wav(input_path: str, output_path: str) -> dict:
 
     # Find audio codec
     codec = "unknown"
+    has_audio_stream = False
     for stream in probe_data.get("streams", []):
         if stream.get("codec_type") == "audio":
+            has_audio_stream = True
             codec = stream.get("codec_long_name", stream.get("codec_name", "unknown"))
             break
+
+    if not has_audio_stream:
+        raise ValueError("В файле не найдена аудиодорожка. Загрузите видео или аудио с доступным звуком.")
 
     file_info = (
         f"File: {os.path.basename(input_path)}\n"
@@ -206,11 +229,19 @@ def convert_to_wav(input_path: str, output_path: str) -> dict:
 
     # Convert to WAV
     ffmpeg_cmd = [
-        "ffmpeg", "-y", "-i", input_path,
+        "ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", input_path,
+        "-vn",
         "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le",
         output_path,
     ]
-    subprocess.run(ffmpeg_cmd, capture_output=True, check=True)
+    subprocess.run(
+        ffmpeg_cmd,
+        capture_output=True,
+        check=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
 
     return {
         "file_info": file_info,
@@ -337,10 +368,16 @@ async def process_generator(file: UploadFile | None, chat_text: str, source_lang
                     "stage": "ffmpeg",
                 })
                 return
+            except ValueError as exc:
+                log.error("  [ffmpeg] ERROR: %s", exc)
+                yield sse("error", {"message": str(exc), "stage": "ffmpeg"})
+                return
             except subprocess.CalledProcessError as exc:
-                stderr = exc.stderr.decode(errors="replace") if exc.stderr else ""
-                log.error("  [ffmpeg] ERROR: %s", stderr[:300])
-                yield sse("error", {"message": f"FFmpeg error: {stderr[:500]}", "stage": "ffmpeg"})
+                stderr = exc.stderr or ""
+                stdout = exc.stdout or ""
+                error_text = _tail_text(stderr or stdout or str(exc))
+                log.error("  [ffmpeg] ERROR: %s", error_text)
+                yield sse("error", {"message": f"FFmpeg error: {error_text}", "stage": "ffmpeg"})
                 return
             log.info("  [ffmpeg] done — %s, %s  (%.2fs)", meta["format"], meta["duration"], time.monotonic() - t0)
             yield sse("ffmpeg_done", meta)

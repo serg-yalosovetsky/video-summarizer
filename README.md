@@ -76,11 +76,15 @@ HF_TOKEN=hf_your_token_here
 ---
 
 ## Running the web app
+=======
+Запустить сервер:
+>>>>>>> d5fa7e43114141f063c1eb81eda46df3d7b88427
 
 ```bash
 uvicorn main:app --host 0.0.0.0 --port 8000
 ```
 
+<<<<<<< HEAD
 Open [http://localhost:8000](http://localhost:8000), upload a file, and click **Суммаризировать**.
 
 On first run the Canary model is downloaded from HuggingFace (~2 GB) and cached locally.
@@ -144,4 +148,43 @@ video-summarizer/
 ├── static/
 │   └── index.html    # Single-page frontend
 └── .env              # HF token (not committed)
+```
+
+---
+
+## Docker
+
+The container includes the Python app and `ffmpeg`. Ollama is not bundled — run it separately and pass the address via `OLLAMA_URL`.
+
+Build the image:
+
+```bash
+docker build -t video-summarizer .
+```
+
+Run on Windows/macOS Docker Desktop with Ollama on the host:
+
+```bash
+docker run --rm -p 8000:8000 ^
+  -e OLLAMA_URL=http://host.docker.internal:11434/api/generate ^
+  -e OLLAMA_MODEL=gemma4:e4b ^
+  -e HF_TOKEN=your_hf_token ^
+  video-summarizer
+```
+
+Run on Linux with Ollama on the host:
+
+```bash
+docker run --rm -p 8000:8000 \
+  --add-host=host.docker.internal:host-gateway \
+  -e OLLAMA_URL=http://host.docker.internal:11434/api/generate \
+  -e OLLAMA_MODEL=gemma4:e4b \
+  -e HF_TOKEN=your_hf_token \
+  video-summarizer
+```
+
+If Ollama runs in a separate container on the same Docker network, use its service name:
+
+```text
+http://ollama:11434/api/generate
 ```
