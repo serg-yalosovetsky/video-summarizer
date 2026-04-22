@@ -20,7 +20,7 @@ from frames_analyze import (
     generate_frame_timestamps,
     is_context_sufficient,
 )
-from helpers import LOCAL_TMP, MAX_UPLOAD_BYTES, combine_sources, log, sse, tail_text
+from helpers import LOCAL_TMP, MAX_UPLOAD_BYTES, combine_sources, log, remove_repetitions, sse, tail_text
 from summary import (
     classify_is_meeting,
     classify_text_language,
@@ -29,7 +29,9 @@ from summary import (
     generate_summary,
     translate_summary_to_russian,
 )
-from transcribe import convert_to_wav, transcribe_with_canary
+from contextlib import asynccontextmanager
+
+from transcribe import convert_to_wav, get_canary_model, transcribe_with_canary
 
 
 async def process_generator(
@@ -272,6 +274,7 @@ async def process_generator(
             )
             return
         log.info("  [gemma/clean] done  (%.2fs)", time.monotonic() - t0)
+        cleaned_text = remove_repetitions(cleaned_text)
         yield sse("cleaned_done", {"text": cleaned_text})
 
         is_meeting = False
@@ -357,7 +360,16 @@ async def process_generator(
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
-app = FastAPI(title="Video Summarizer")
+@asynccontextmanager
+async def lifespan(app):
+    loop = asyncio.get_event_loop()
+    log.info("Pre-loading Canary model at startup...")
+    await loop.run_in_executor(None, get_canary_model)
+    log.info("Canary model ready — service accepting requests.")
+    yield
+
+
+app = FastAPI(title="Video Summarizer", lifespan=lifespan)
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
 

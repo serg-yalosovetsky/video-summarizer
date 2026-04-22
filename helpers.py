@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import subprocess
 
 import httpx
@@ -77,6 +78,25 @@ def combine_sources(transcript: str, chat: str) -> str:
     if chat.strip():
         parts.append(f"=== Chat Messages ===\n{chat.strip()}")
     return "\n\n".join(parts)
+
+
+def remove_repetitions(text: str, max_consecutive: int = 2) -> str:
+    """Collapse consecutive identical lines — removes LLM hallucination loops."""
+    lines = text.split("\n")
+    result = []
+    prev_content = None
+    consecutive = 0
+    for line in lines:
+        content = re.sub(r"^\[\d{2}:\d{2}:\d{2}\]\s*", "", line).strip()
+        if content and content == prev_content:
+            consecutive += 1
+            if consecutive <= max_consecutive:
+                result.append(line)
+        else:
+            prev_content = content
+            consecutive = 1
+            result.append(line)
+    return "\n".join(result)
 
 
 def call_ollama(prompt: str, system: str = "", *, timeout: float = 900.0) -> str:

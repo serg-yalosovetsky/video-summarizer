@@ -16,7 +16,7 @@ Results stream to the browser in real time via SSE.
 
 | Dependency | Purpose |
 |---|---|
-| Python 3.10+ | Runtime |
+| Python 3.10–3.13 | Runtime (3.14 not supported by numba) |
 | FFmpeg | Audio/video conversion |
 | Ollama | LLM inference (Gemma) |
 | CUDA (optional) | GPU acceleration for Canary |
@@ -27,17 +27,18 @@ Results stream to the browser in real time via SSE.
 
 ### 1. Clone and create a virtual environment
 
+Use [uv](https://github.com/astral-sh/uv) to create a venv with Python 3.13 (required — Python 3.14 is not yet supported by `numba`/NeMo):
+
 ```bash
 git clone <repo-url>
 cd video-summarizer
-python -m venv .venv
-source .venv/bin/activate
+uv venv --python 3.13 venv
 ```
 
 ### 2. Install Python dependencies
 
 ```bash
-pip install -r requirements.txt
+uv pip install -r requirements.txt
 ```
 
 > NeMo is a large package. For a CUDA-specific install see the
@@ -76,15 +77,11 @@ HF_TOKEN=hf_your_token_here
 ---
 
 ## Running the web app
-=======
-Запустить сервер:
->>>>>>> d5fa7e43114141f063c1eb81eda46df3d7b88427
 
 ```bash
 uvicorn main:app --host 0.0.0.0 --port 8000
 ```
 
-<<<<<<< HEAD
 Open [http://localhost:8000](http://localhost:8000), upload a file, and click **Суммаризировать**.
 
 On first run the Canary model is downloaded from HuggingFace (~2 GB) and cached locally.

@@ -4,6 +4,7 @@ Transcription stage for the web app plus a standalone CLI entry point.
 
 from __future__ import annotations
 
+import asyncio
 import argparse
 import json
 import os
@@ -36,7 +37,6 @@ def choose_device() -> str:
 
 @lru_cache(maxsize=1)
 def get_canary_model():
-    import requests
     from nemo.collections.asr.models import ASRModel
 
     log.info("Loading NeMo Canary model...")
@@ -53,7 +53,7 @@ def get_canary_model():
             model = ASRModel.restore_from(restore_path=str(model_ref.resolve()))
         else:
             model = ASRModel.from_pretrained(model_name=CANARY_MODEL)
-    except requests.exceptions.RequestException as exc:
+    except OSError as exc:
         log.error(
             "Failed to download Canary model. Pass a local .nemo file via CANARY_MODEL "
             "env var or ensure network access. Error: %s",
@@ -163,8 +163,8 @@ def convert_to_wav(input_path: str, output_path: str) -> dict:
 
 def transcribe_with_canary(
     wav_path: str,
-    async_q,
-    loop,
+    async_q: asyncio.Queue,
+    loop: asyncio.AbstractEventLoop,
     source_lang: str = "ru",
     target_lang: str | None = None,
 ) -> str:
@@ -182,7 +182,8 @@ def transcribe_with_canary(
     except Exception:
         log.exception("  [canary] inference failed")
         raise
-    loop.call_soon_threadsafe(async_q.put_nowait, None)
+    finally:
+        loop.call_soon_threadsafe(async_q.put_nowait, None)
     if outputs:
         return getattr(outputs[0], "text", str(outputs[0]))
     return ""

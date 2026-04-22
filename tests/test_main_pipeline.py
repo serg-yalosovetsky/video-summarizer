@@ -19,6 +19,7 @@ def install_test_stubs() -> None:
 
 install_test_stubs()
 main = importlib.import_module("main")
+transcribe = importlib.import_module("transcribe")
 
 
 def decode_events(messages: list[str]) -> list[dict]:
@@ -131,6 +132,23 @@ class ProcessGeneratorTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("tldr_done", event_names)
         self.assertLess(event_names.index("ffmpeg_done"), event_names.index("transcript_done"))
         self.assertLess(event_names.index("cleaned_done"), event_names.index("summary_done"))
+
+    async def test_transcribe_with_canary_signals_queue_on_error(self):
+        class BrokenModel:
+            def transcribe(self, **kwargs):
+                raise RuntimeError("boom")
+
+        queue = asyncio.Queue()
+        loop = asyncio.get_running_loop()
+
+        with mock.patch.object(transcribe, "get_canary_model", return_value=BrokenModel()):
+            with self.assertRaises(RuntimeError):
+                transcribe.transcribe_with_canary("audio.wav", queue, loop, "ru")
+
+        progress = await queue.get()
+        done = await queue.get()
+        self.assertEqual(progress, 1)
+        self.assertIsNone(done)
 
 
 if __name__ == "__main__":
