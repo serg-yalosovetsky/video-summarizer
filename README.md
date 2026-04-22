@@ -19,7 +19,7 @@ Results stream to the browser in real time via SSE.
 | Python 3.10–3.12 | Runtime (3.13+ not supported by editdistance/numba) |
 | FFmpeg | Audio/video conversion |
 | Ollama | LLM inference (Gemma) |
-| CUDA (optional) | GPU acceleration for Canary |
+| CUDA | GPU acceleration for Canary (default runtime mode) |
 
 ---
 
@@ -27,22 +27,35 @@ Results stream to the browser in real time via SSE.
 
 ### 1. Clone and create a virtual environment
 
-Use [uv](https://github.com/astral-sh/uv) to create a venv with Python 3.12 (required — Python 3.13+ not yet supported by `editdistance`/`numba` on Windows):
+Use [uv](https://github.com/astral-sh/uv) with the pinned Python version from `.python-version` (currently 3.12.11):
 
 ```bash
 git clone <repo-url>
 cd video-summarizer
-uv venv --python 3.12 venv
+uv python install 3.12.11
+uv venv --python 3.12.11 .venv
 ```
 
 ### 2. Install Python dependencies
 
 ```bash
-uv pip install -r requirements.txt
+uv pip install --python .venv/bin/python -r requirements.txt
 ```
 
-> NeMo is a large package. For a CUDA-specific install see the
-> [NeMo installation guide](https://docs.nvidia.com/nemo-framework/user-guide/latest/installation.html).
+If you need Canary on CUDA, do not stop at the generic command above. That installs the default `torch` wheel, which is often CPU-only on Windows.
+Use the project bootstrap instead, which verifies `torch.cuda.is_available()` and repairs PyTorch from the CUDA wheel index when `CANARY_DEVICE=cuda`:
+
+```bash
+./install.sh
+```
+
+On Windows:
+
+```bat
+install.bat
+```
+
+NeMo is a large package. For manual CUDA-specific installs see the [NeMo installation guide](https://docs.nvidia.com/nemo-framework/user-guide/latest/installation.html).
 
 ### 3. Install FFmpeg
 
@@ -74,12 +87,31 @@ Create a `.env` file in the project root if `nvidia/canary-1b-v2` is gated on Hu
 HF_TOKEN=hf_your_token_here
 ```
 
+The app defaults to `CANARY_DEVICE=cuda` and will fail fast if CUDA is unavailable instead of silently using CPU.
+If you intentionally want CPU fallback for debugging, set:
+
+```env
+CANARY_DEVICE=auto
+```
+
 ---
 
 ## Running the web app
 
 ```bash
 uvicorn main:app --host 0.0.0.0 --port 8000
+```
+
+Or use the bootstrap scripts, which install `uv`, install the pinned Python version, create `.venv`, install dependencies, and then start the app:
+
+```bash
+./run.sh
+```
+
+On Windows:
+
+```bat
+run.bat
 ```
 
 Open [http://localhost:8000](http://localhost:8000), upload a file, and click **Суммаризировать**.

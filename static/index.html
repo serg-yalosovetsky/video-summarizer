@@ -414,7 +414,7 @@
 
     <!-- Short summary card (~10% of summary) -->
     <div id="tldr-card" style="display:none; background:var(--surface); border:1px solid var(--accent); border-radius:var(--radius); padding:1.1rem 1.3rem; animation: fadeIn 0.3s ease;">
-      <div style="font-size:0.75rem;font-weight:700;color:var(--accent);text-transform:uppercase;letter-spacing:0.07em;margin-bottom:0.5rem;">Краткое саммари</div>
+      <div id="tldr-title" style="font-size:0.75rem;font-weight:700;color:var(--accent);text-transform:uppercase;letter-spacing:0.07em;margin-bottom:0.5rem;">Краткое саммари</div>
       <div id="content-tldr" class="summary-content"></div>
     </div>
   </main>
@@ -448,6 +448,7 @@
       document.getElementById('content-cleaned').textContent = '';
       document.getElementById('content-summary').innerHTML = '';
       document.getElementById('tldr-card').style.display = 'none';
+      document.getElementById('tldr-title').textContent = 'Краткое саммари';
       document.getElementById('content-tldr').textContent = '';
       // hide transcript spoiler if no video was submitted
       document.getElementById('spoiler-transcript').style.display = 'none';
@@ -583,6 +584,7 @@
         case 'tldr_done': {
           const card = document.getElementById('tldr-card');
           card.style.display = '';
+          document.getElementById('tldr-title').textContent = payload.title || 'Краткое саммари';
           document.getElementById('content-tldr').innerHTML = renderMarkdown(payload.text);
           break;
         }

@@ -116,6 +116,7 @@ class ProcessGeneratorTests(unittest.IsolatedAsyncioTestCase):
             mock.patch.object(main, "classify_text_language", return_value="other"),
             mock.patch.object(main, "translate_summary_to_russian", return_value="russian translation"),
             mock.patch.object(main, "generate_short_summary", return_value="short summary"),
+            mock.patch.object(main, "generate_personal_todo", return_value="todo summary"),
         ):
             chunks = []
             async for item in main.process_generator(upload, "chat line", "ru"):
@@ -132,6 +133,9 @@ class ProcessGeneratorTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("tldr_done", event_names)
         self.assertLess(event_names.index("ffmpeg_done"), event_names.index("transcript_done"))
         self.assertLess(event_names.index("cleaned_done"), event_names.index("summary_done"))
+        tldr_event = next(event for event in events if event["event"] == "tldr_done")
+        self.assertEqual(tldr_event["payload"]["title"], "Краткое саммари")
+        self.assertFalse(tldr_event["payload"]["is_meeting"])
 
     async def test_transcribe_with_canary_signals_queue_on_error(self):
         class BrokenModel:
@@ -149,6 +153,60 @@ class ProcessGeneratorTests(unittest.IsolatedAsyncioTestCase):
         done = await queue.get()
         self.assertEqual(progress, 1)
         self.assertIsNone(done)
+
+    async def test_process_generator_emits_personal_todo_for_meetings(self):
+        with (
+            mock.patch.object(main, "clean_content", return_value="meeting transcript"),
+            mock.patch.object(main, "classify_is_meeting", return_value=True),
+            mock.patch.object(main, "generate_summary", return_value="meeting summary"),
+            mock.patch.object(main, "classify_text_language", return_value="ru"),
+            mock.patch.object(main, "generate_short_summary", return_value="short summary"),
+            mock.patch.object(main, "generate_personal_todo", return_value="todo for sergey"),
+        ):
+            chunks = []
+            async for item in main.process_generator(None, "meeting chat", "ru"):
+                chunks.append(item)
+
+        events = decode_events(chunks)
+        tldr_event = next(event for event in events if event["event"] == "tldr_done")
+        self.assertEqual(tldr_event["payload"]["title"], "ToDo для меня")
+        self.assertTrue(tldr_event["payload"]["is_meeting"])
+        self.assertEqual(tldr_event["payload"]["text"], "todo for sergey")
+
+
+class ChooseDeviceTests(unittest.TestCase):
+    def test_choose_device_uses_cuda_when_available(self):
+        fake_torch = mock.Mock()
+        fake_torch.cuda.is_available.return_value = True
+        with (
+            mock.patch.dict(transcribe.__dict__, {"CANARY_DEVICE": "cuda"}),
+            mock.patch.dict(sys.modules, {"torch": fake_torch}),
+        ):
+            self.assertEqual(transcribe.choose_device(), "cuda")
+
+    def test_choose_device_fails_when_cuda_required_but_unavailable(self):
+        fake_torch = mock.Mock()
+        fake_torch.__version__ = "2.8.0"
+        fake_torch.version.cuda = None
+        fake_torch.cuda.is_available.return_value = False
+        with (
+            mock.patch.dict(transcribe.__dict__, {"CANARY_DEVICE": "cuda"}),
+            mock.patch.dict(sys.modules, {"torch": fake_torch}),
+        ):
+            with self.assertRaisesRegex(
+                RuntimeError,
+                r"install\.bat/install\.sh.*torch\.version\.cuda=None",
+            ):
+                transcribe.choose_device()
+
+    def test_choose_device_allows_auto_fallback_to_cpu(self):
+        fake_torch = mock.Mock()
+        fake_torch.cuda.is_available.return_value = False
+        with (
+            mock.patch.dict(transcribe.__dict__, {"CANARY_DEVICE": "auto"}),
+            mock.patch.dict(sys.modules, {"torch": fake_torch}),
+        ):
+            self.assertEqual(transcribe.choose_device(), "cpu")
 
 
 if __name__ == "__main__":

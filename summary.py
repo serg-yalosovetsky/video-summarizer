@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from helpers import call_ollama
+from helpers import call_ollama, load_user_profile
 from prompts import (
     CLEAN_PROMPT_TEMPLATE,
     CLEAN_SYSTEM,
@@ -10,6 +10,8 @@ from prompts import (
     MEETING_DETECTION_SYSTEM,
     MEETING_SUMMARY_PROMPT_TEMPLATE,
     MEETING_SUMMARY_SYSTEM,
+    PERSONAL_TODO_PROMPT_TEMPLATE,
+    PERSONAL_TODO_SYSTEM,
     RUSSIAN_TRANSLATION_PROMPT_TEMPLATE,
     RUSSIAN_TRANSLATION_SYSTEM,
     SHORT_SUMMARY_PROMPT_TEMPLATE,
@@ -39,11 +41,22 @@ def classify_is_meeting(text: str) -> bool:
 
 
 def generate_summary(transcript: str, *, is_meeting: bool = False) -> str:
+    user_profile = load_user_profile()
+    user_name = user_profile["primary_name"]
+    user_aliases = ", ".join(user_profile["aliases"])
     if is_meeting:
-        prompt = MEETING_SUMMARY_PROMPT_TEMPLATE.format(transcript=transcript)
+        prompt = MEETING_SUMMARY_PROMPT_TEMPLATE.format(
+            transcript=transcript,
+            user_name=user_name,
+            user_aliases=user_aliases,
+        )
         system = MEETING_SUMMARY_SYSTEM
     else:
-        prompt = SUMMARY_PROMPT_TEMPLATE.format(transcript=transcript)
+        prompt = SUMMARY_PROMPT_TEMPLATE.format(
+            transcript=transcript,
+            user_name=user_name,
+            user_aliases=user_aliases,
+        )
         system = SUMMARY_SYSTEM
     return call_ollama(prompt, system)
 
@@ -51,6 +64,16 @@ def generate_summary(transcript: str, *, is_meeting: bool = False) -> str:
 def generate_short_summary(transcript: str) -> str:
     prompt = SHORT_SUMMARY_PROMPT_TEMPLATE.format(transcript=transcript)
     return call_ollama(prompt, SUMMARY_SYSTEM)
+
+
+def generate_personal_todo(transcript: str) -> str:
+    user_profile = load_user_profile()
+    prompt = PERSONAL_TODO_PROMPT_TEMPLATE.format(
+        transcript=transcript,
+        user_name=user_profile["primary_name"],
+        user_aliases=", ".join(user_profile["aliases"]),
+    )
+    return call_ollama(prompt, PERSONAL_TODO_SYSTEM)
 
 
 def classify_text_language(text: str) -> str:

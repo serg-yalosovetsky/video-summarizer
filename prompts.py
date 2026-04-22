@@ -57,7 +57,9 @@ SUMMARY_PROMPT_TEMPLATE = (
     "1. **Main Topic**: What this content is about in 1-2 sentences\n"
     "2. **Key Points**: The most important points covered (bullet list)\n"
     "3. **Details**: Relevant supporting information or context\n"
-    "4. **Conclusion**: Main takeaway or outcome\n\n"
+    "4. **What concerns {user_name}**: highlight all mentions, tasks, requests, blockers, decisions, risks, or follow-ups "
+    "that concern {user_name} or these aliases: {user_aliases}. If there is nothing relevant, say so explicitly.\n"
+    "5. **Conclusion**: Main takeaway or outcome\n\n"
     "Content:\n{transcript}"
 )
 
@@ -72,6 +74,27 @@ SHORT_SUMMARY_PROMPT_TEMPLATE = (
     "If the content is not about solving a problem, write a plain structured summary covering the key points.\n\n"
     "Use the SAME LANGUAGE as the input. Output only the summary, no commentary.\n\n"
     "Content:\n{transcript}"
+)
+
+PERSONAL_TODO_SYSTEM = (
+    "You are an expert meeting assistant. "
+    "Extract only actionable items relevant to the specified person. "
+    "IMPORTANT: Always respond in the same language as the transcript."
+)
+
+PERSONAL_TODO_PROMPT_TEMPLATE = (
+    "Analyze the following meeting transcript and write a personal TODO list for {user_name}. "
+    "{user_name} may also be mentioned under these aliases: {user_aliases}.\n\n"
+    "Include only items that clearly concern {user_name}: assigned work, requests to respond, follow-ups, "
+    "deadlines, blockers, approvals needed, and dependencies.\n\n"
+    "Structure the output exactly with these sections:\n"
+    "1. **Задачи для {user_name}**\n"
+    "2. **Что ждут от {user_name}**\n"
+    "3. **Сроки и договорённости для {user_name}**\n"
+    "4. **Блокеры и риски для {user_name}**\n\n"
+    "If the transcript contains no clear action items for {user_name}, say that explicitly in the first section "
+    "and keep the remaining sections brief.\n\n"
+    "Transcript:\n{transcript}"
 )
 
 MEETING_DETECTION_SYSTEM = (
@@ -100,7 +123,10 @@ MEETING_SUMMARY_PROMPT_TEMPLATE = (
     "3. **Проблема / задача**: The main problem or goal the meeting addressed\n"
     "4. **Варианты решения**: Approaches, options, or solutions discussed\n"
     "5. **Договорённости**: Concrete action items — who does what and by when (if mentioned)\n"
-    "6. **Краткое описание**: 3-5 sentence overall description of the meeting\n\n"
+    "6. **Что касается {user_name}**: separately highlight all mentions, tasks, responsibilities, blockers, approvals, "
+    "deadlines, decisions, and follow-ups related to {user_name} or these aliases: {user_aliases}. "
+    "If nothing concerns {user_name}, say so explicitly.\n"
+    "7. **Краткое описание**: 3-5 sentence overall description of the meeting\n\n"
     "Transcript:\n{transcript}"
 )
 

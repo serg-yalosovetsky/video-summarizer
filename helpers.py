@@ -5,6 +5,7 @@ import logging
 import os
 import re
 import subprocess
+from functools import lru_cache
 
 import httpx
 from dotenv import load_dotenv
@@ -58,6 +59,7 @@ MAX_UPLOAD_BYTES = 500 * 1024 * 1024
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 LOCAL_TMP = os.path.join(BASE_DIR, "tmp")
 os.makedirs(LOCAL_TMP, exist_ok=True)
+PROJECT_MEMORY_PATH = os.path.join(BASE_DIR, ".omx", "project-memory.json")
 
 
 def tail_text(text: str, limit: int = 500) -> str:
@@ -112,3 +114,30 @@ def call_ollama(prompt: str, system: str = "", *, timeout: float = 900.0) -> str
     )
     response.raise_for_status()
     return response.json()["response"]
+
+
+@lru_cache(maxsize=1)
+def load_user_profile() -> dict:
+    profile = {
+        "primary_name": "Сергей",
+        "aliases": ["Сергей", "Сергій", "Serhii"],
+    }
+    try:
+        with open(PROJECT_MEMORY_PATH, "r", encoding="utf-8") as file_handle:
+            data = json.load(file_handle)
+    except FileNotFoundError:
+        return profile
+    except Exception as exc:
+        log.warning("Failed to read project memory: %s", exc)
+        return profile
+
+    user_profile = data.get("user_profile") or {}
+    primary_name = str(user_profile.get("primary_name") or profile["primary_name"]).strip()
+    aliases = user_profile.get("aliases") or profile["aliases"]
+    aliases = [str(alias).strip() for alias in aliases if str(alias).strip()]
+    if primary_name not in aliases:
+        aliases.insert(0, primary_name)
+    return {
+        "primary_name": primary_name,
+        "aliases": aliases,
+    }

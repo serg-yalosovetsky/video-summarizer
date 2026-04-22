@@ -25,6 +25,7 @@ from summary import (
     classify_is_meeting,
     classify_text_language,
     clean_content,
+    generate_personal_todo,
     generate_short_summary,
     generate_summary,
     translate_summary_to_russian,
@@ -340,20 +341,37 @@ async def process_generator(
             },
         )
 
-        yield sse("status", {"message": "Generating short TL;DR with Gemma..."})
-        log.info("  [gemma/tldr] calling ollama...")
+        tldr_title = "Краткое саммари"
+        tldr_stage = "tldr"
+        tldr_message = "Generating short TL;DR with Gemma..."
+        tldr_callable = lambda: generate_short_summary(cleaned_text)
+        if is_meeting:
+            tldr_title = "ToDo для меня"
+            tldr_stage = "todo"
+            tldr_message = "Generating personal ToDo for you..."
+            tldr_callable = lambda: generate_personal_todo(cleaned_text)
+
+        yield sse("status", {"message": tldr_message})
+        log.info("  [gemma/%s] calling ollama...", tldr_stage)
         t0 = time.monotonic()
         try:
-            tldr_text = await loop.run_in_executor(None, generate_short_summary, cleaned_text)
+            tldr_text = await loop.run_in_executor(None, tldr_callable)
         except Exception as exc:
-            log.error("  [gemma/tldr] ERROR: %s", exc)
+            log.error("  [gemma/%s] ERROR: %s", tldr_stage, exc)
             yield sse(
                 "error",
-                {"message": f"Ollama (tldr) error: {exc}", "stage": "tldr"},
+                {"message": f"Ollama ({tldr_stage}) error: {exc}", "stage": tldr_stage},
             )
             return
-        log.info("  [gemma/tldr] done  (%.2fs)", time.monotonic() - t0)
-        yield sse("tldr_done", {"text": tldr_text})
+        log.info("  [gemma/%s] done  (%.2fs)", tldr_stage, time.monotonic() - t0)
+        yield sse(
+            "tldr_done",
+            {
+                "text": tldr_text,
+                "title": tldr_title,
+                "is_meeting": is_meeting,
+            },
+        )
 
         log.info("◄ [%s] Complete - total %.2fs", request_label, time.monotonic() - total_start)
     finally:

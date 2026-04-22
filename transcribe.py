@@ -19,6 +19,7 @@ from helpers import HF_TOKEN, log, tail_text
 
 
 CANARY_MODEL = os.environ.get("CANARY_MODEL", "nvidia/canary-1b-v2")
+CANARY_DEVICE = os.environ.get("CANARY_DEVICE", "cuda").strip().lower()
 
 
 def parse_args() -> argparse.Namespace:
@@ -29,10 +30,39 @@ def parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
+def cuda_diagnostics(torch_module) -> str:
+    return (
+        f"torch={torch_module.__version__}, "
+        f"torch.version.cuda={torch_module.version.cuda}, "
+        f"torch.cuda.is_available()={torch_module.cuda.is_available()}, "
+        f"nvidia-smi={'found' if shutil.which('nvidia-smi') else 'missing'}"
+    )
+
+
 def choose_device() -> str:
     import torch
 
-    return "cuda" if torch.cuda.is_available() else "cpu"
+    if CANARY_DEVICE not in {"cuda", "cpu", "auto"}:
+        raise RuntimeError(
+            f"Unsupported CANARY_DEVICE={CANARY_DEVICE!r}. Use one of: cuda, cpu, auto."
+        )
+
+    if CANARY_DEVICE == "cpu":
+        return "cpu"
+
+    if torch.cuda.is_available():
+        return "cuda"
+
+    if CANARY_DEVICE == "auto":
+        log.warning("CUDA is unavailable, falling back to CPU because CANARY_DEVICE=auto.")
+        return "cpu"
+
+    raise RuntimeError(
+        "CUDA is required for Canary but is unavailable. "
+        f"{cuda_diagnostics(torch)}. "
+        "Run install.bat/install.sh to install a CUDA-enabled PyTorch build and verify NVIDIA drivers, "
+        "or set CANARY_DEVICE=auto/cpu if you intentionally want CPU mode."
+    )
 
 
 @lru_cache(maxsize=1)
