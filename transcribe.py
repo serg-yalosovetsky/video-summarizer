@@ -18,24 +18,54 @@ import time
 from faster_whisper import WhisperModel
 
 
+def _tail_text(text: str, limit: int = 300) -> str:
+    cleaned = (text or "").strip()
+    if len(cleaned) <= limit:
+        return cleaned
+    return cleaned[-limit:]
+
+
 def convert_to_wav(input_path: str, output_path: str) -> float:
     """Run ffprobe + ffmpeg. Returns duration in seconds."""
     probe_cmd = [
-        "ffprobe", "-v", "quiet",
+        "ffprobe", "-v", "error",
         "-print_format", "json",
-        "-show_format",
+        "-show_streams", "-show_format",
         input_path,
     ]
-    result = subprocess.run(probe_cmd, capture_output=True, check=True)
-    fmt = json.loads(result.stdout).get("format", {})
+    result = subprocess.run(
+        probe_cmd,
+        capture_output=True,
+        check=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    probe_data = json.loads(result.stdout)
+    fmt = probe_data.get("format", {})
     duration = float(fmt.get("duration", 0))
 
+    has_audio_stream = any(
+        stream.get("codec_type") == "audio"
+        for stream in probe_data.get("streams", [])
+    )
+    if not has_audio_stream:
+        raise ValueError("No audio stream found in the input file.")
+
     ffmpeg_cmd = [
-        "ffmpeg", "-y", "-i", input_path,
+        "ffmpeg", "-hide_banner", "-loglevel", "error", "-y", "-i", input_path,
+        "-vn",
         "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le",
         output_path,
     ]
-    subprocess.run(ffmpeg_cmd, capture_output=True, check=True)
+    subprocess.run(
+        ffmpeg_cmd,
+        capture_output=True,
+        check=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
     return duration
 
 
@@ -105,8 +135,13 @@ def main():
     except FileNotFoundError:
         print("  ERROR: ffprobe/ffmpeg not found — install FFmpeg and add to PATH")
         sys.exit(1)
+    except ValueError as e:
+        print(f"  ERROR: {e}")
+        sys.exit(1)
     except subprocess.CalledProcessError as e:
-        print(f"  ERROR: {e.stderr.decode(errors='replace')[:300]}")
+        stderr = e.stderr or ""
+        stdout = e.stdout or ""
+        print(f"  ERROR: {_tail_text(stderr or stdout or str(e))}")
         sys.exit(1)
 
     # Transcribe
