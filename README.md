@@ -16,7 +16,7 @@ Results stream to the browser in real time via SSE.
 
 | Dependency | Purpose |
 |---|---|
-| Python 3.10–3.13 | Runtime (3.14 not supported by numba) |
+| Python 3.10–3.12 | Runtime (3.13+ not supported by editdistance/numba) |
 | FFmpeg | Audio/video conversion |
 | Ollama | LLM inference (Gemma) |
 | CUDA (optional) | GPU acceleration for Canary |
@@ -27,12 +27,12 @@ Results stream to the browser in real time via SSE.
 
 ### 1. Clone and create a virtual environment
 
-Use [uv](https://github.com/astral-sh/uv) to create a venv with Python 3.13 (required — Python 3.14 is not yet supported by `numba`/NeMo):
+Use [uv](https://github.com/astral-sh/uv) to create a venv with Python 3.12 (required — Python 3.13+ not yet supported by `editdistance`/`numba` on Windows):
 
 ```bash
 git clone <repo-url>
 cd video-summarizer
-uv venv --python 3.13 venv
+uv venv --python 3.12 venv
 ```
 
 ### 2. Install Python dependencies
