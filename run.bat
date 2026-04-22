@@ -3,7 +3,7 @@ setlocal
 
 cd /d "%~dp0"
 
-start "" powershell -NoProfile -Command "Start-Sleep -Seconds 6; Start-Process 'http://localhost:8000'"
+start "" /b powershell -NoProfile -WindowStyle Hidden -Command "Start-Sleep -Seconds 10; Start-Process 'http://localhost:8000'"
 
 set "PYTHON_EXE=%~dp0venv\Scripts\python.exe"
 if exist "%PYTHON_EXE%" (

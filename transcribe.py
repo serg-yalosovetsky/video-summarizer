@@ -1,11 +1,5 @@
 """
-Standalone transcription script — runs NeMo Canary 1B v2 on a file and prints the transcript.
-
-Usage:
-    python transcribe.py <path/to/file> [--source-lang en] [--target-lang en]
-
-The file is first converted to 16 kHz mono WAV via torchaudio, then transcribed
-with nvidia/canary-1b-v2.
+Transcription stage for the web app plus a standalone CLI entry point.
 """
 
 from __future__ import annotations
@@ -13,126 +7,247 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import shutil
+import subprocess
 import sys
 import tempfile
+from functools import lru_cache
 from pathlib import Path
 
-import torch
-from dotenv import load_dotenv
+from helpers import HF_TOKEN, log, tail_text
+
+
+CANARY_MODEL = os.environ.get("CANARY_MODEL", "nvidia/canary-1b-v2")
 
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Transcribe audio/video with NeMo Canary 1B v2.")
     parser.add_argument("audio", help="Path to audio/video file")
-    parser.add_argument("--source-lang", default="en", help="Source language code (default: en)")
+    parser.add_argument("--source-lang", default="ru", help="Source language code (default: ru)")
     parser.add_argument("--target-lang", default=None, help="Target language code (defaults to source)")
-    parser.add_argument(
-        "--model",
-        default="nvidia/canary-1b-v2",
-        help="HuggingFace model name or local .nemo path",
-    )
     return parser.parse_args()
 
 
 def choose_device() -> str:
+    import torch
+
     return "cuda" if torch.cuda.is_available() else "cpu"
 
 
-def load_hf_token() -> str | None:
-    load_dotenv()
-    token = (
-        os.environ.get("HUGGING_FACE_HUB_TOKEN")
-        or os.environ.get("HF_TOKEN")
-        or os.environ.get("HUGGINGFACE_HUB_TOKEN")
-    )
-    if token:
-        os.environ.setdefault("HUGGING_FACE_HUB_TOKEN", token)
-        os.environ.setdefault("HF_TOKEN", token)
-        os.environ.setdefault("HUGGINGFACE_HUB_TOKEN", token)
-    return token
-
-
-def prepare_audio(audio_path: str, target_sr: int = 16000) -> str:
-    """Convert any audio/video to 16 kHz mono WAV using ffmpeg."""
-    import subprocess
-
-    source = Path(audio_path).expanduser().resolve()
-    tmpdir = Path(tempfile.mkdtemp(prefix="canary_"))
-    out_path = tmpdir / f"{source.stem}_mono_{target_sr}.wav"
-
-    cmd = [
-        "ffmpeg", "-y", "-i", str(source),
-        "-ar", str(target_sr), "-ac", "1", "-c:a", "pcm_s16le",
-        str(out_path),
-    ]
-    result = subprocess.run(cmd, capture_output=True)
-    if result.returncode != 0:
-        raise RuntimeError(result.stderr.decode(errors="replace")[:500])
-
-    return str(out_path)
-
-
-def load_model(model_name: str, device: str):
+@lru_cache(maxsize=1)
+def get_canary_model():
     import requests
     from nemo.collections.asr.models import ASRModel
 
-    model_ref = Path(model_name).expanduser()
+    log.info("Loading NeMo Canary model...")
+    device = choose_device()
+    log.info("  [canary] device: %s", device)
+    if not HF_TOKEN:
+        log.warning(
+            "No HuggingFace token found. If the model is gated set HF_TOKEN in .env."
+        )
+
+    model_ref = Path(CANARY_MODEL).expanduser()
     try:
         if model_ref.exists():
             model = ASRModel.restore_from(restore_path=str(model_ref.resolve()))
         else:
-            model = ASRModel.from_pretrained(model_name=model_name)
+            model = ASRModel.from_pretrained(model_name=CANARY_MODEL)
     except requests.exceptions.RequestException as exc:
-        print(f"Failed to download model: {exc}", file=sys.stderr)
+        log.error(
+            "Failed to download Canary model. Pass a local .nemo file via CANARY_MODEL "
+            "env var or ensure network access. Error: %s",
+            exc,
+        )
         raise SystemExit(2) from exc
 
-    return model.cuda() if device == "cuda" else model.cpu()
+    if device == "cuda":
+        model = model.cuda()
+    else:
+        model = model.cpu()
+
+    log.info("Canary model ready (%s).", device.upper())
+    return model
+
+
+def convert_to_wav(input_path: str, output_path: str) -> dict:
+    """Convert any audio/video to 16 kHz mono WAV. Returns metadata dict."""
+    probe_cmd = [
+        "ffprobe",
+        "-v",
+        "error",
+        "-print_format",
+        "json",
+        "-show_streams",
+        "-show_format",
+        input_path,
+    ]
+    probe_result = subprocess.run(
+        probe_cmd,
+        capture_output=True,
+        check=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+    probe_data = json.loads(probe_result.stdout)
+
+    fmt = probe_data.get("format", {})
+    format_name = fmt.get("format_long_name", fmt.get("format_name", "unknown"))
+    duration_sec = float(fmt.get("duration", 0))
+    duration_str = (
+        f"{int(duration_sec // 3600):02d}:{int((duration_sec % 3600) // 60):02d}:"
+        f"{int(duration_sec % 60):02d}"
+    )
+    file_size_mb = int(fmt.get("size", 0)) / (1024 * 1024)
+
+    codec = "unknown"
+    has_audio_stream = False
+    has_video_stream = False
+    for stream in probe_data.get("streams", []):
+        if stream.get("codec_type") == "audio" and not has_audio_stream:
+            has_audio_stream = True
+            codec = stream.get("codec_long_name", stream.get("codec_name", "unknown"))
+        elif stream.get("codec_type") == "video":
+            has_video_stream = True
+
+    if not has_audio_stream:
+        raise ValueError(
+            "В файле не найдена аудиодорожка. Загрузите видео или аудио с доступным звуком."
+        )
+
+    file_info = (
+        f"File: {os.path.basename(input_path)}\n"
+        f"Format: {format_name}\n"
+        f"Duration: {duration_str}\n"
+        f"Audio codec: {codec}\n"
+        f"Size: {file_size_mb:.1f} MB\n"
+        f"Output: 16 kHz mono WAV"
+    )
+
+    ffmpeg_cmd = [
+        "ffmpeg",
+        "-hide_banner",
+        "-loglevel",
+        "error",
+        "-y",
+        "-i",
+        input_path,
+        "-vn",
+        "-ar",
+        "16000",
+        "-ac",
+        "1",
+        "-c:a",
+        "pcm_s16le",
+        output_path,
+    ]
+    subprocess.run(
+        ffmpeg_cmd,
+        capture_output=True,
+        check=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+    )
+
+    return {
+        "file_info": file_info,
+        "format": format_name,
+        "duration": duration_str,
+        "duration_sec": duration_sec,
+        "codec": codec,
+        "has_video": has_video_stream,
+    }
+
+
+def transcribe_with_canary(
+    wav_path: str,
+    async_q,
+    loop,
+    source_lang: str = "ru",
+    target_lang: str | None = None,
+) -> str:
+    """Transcribe WAV using NeMo Canary (single-pass inference)."""
+    model = get_canary_model()
+    target_lang = target_lang or source_lang
+    log.info("  [canary] starting inference (this may take several minutes)...")
+    loop.call_soon_threadsafe(async_q.put_nowait, 1)
+    try:
+        outputs = model.transcribe(
+            audio=[wav_path],
+            source_lang=source_lang,
+            target_lang=target_lang,
+        )
+    except Exception:
+        log.exception("  [canary] inference failed")
+        raise
+    loop.call_soon_threadsafe(async_q.put_nowait, None)
+    if outputs:
+        return getattr(outputs[0], "text", str(outputs[0]))
+    return ""
+
+
+def prepare_audio(audio_path: str, target_sr: int = 16000) -> str:
+    source = Path(audio_path).expanduser().resolve()
+    tmpdir = Path(tempfile.mkdtemp(prefix="canary_"))
+    out_path = tmpdir / f"{source.stem}_mono_{target_sr}.wav"
+    cmd = [
+        "ffmpeg",
+        "-y",
+        "-i",
+        str(source),
+        "-ar",
+        str(target_sr),
+        "-ac",
+        "1",
+        "-c:a",
+        "pcm_s16le",
+        str(out_path),
+    ]
+    result = subprocess.run(cmd, capture_output=True)
+    if result.returncode != 0:
+        raise RuntimeError(tail_text(result.stderr.decode(errors="replace")))
+    return str(out_path)
 
 
 def main() -> int:
     args = parse_args()
     target_lang = args.target_lang or args.source_lang
-
     audio_path = str(Path(args.audio).expanduser().resolve())
     if not Path(audio_path).exists():
         print(f"File not found: {audio_path}", file=sys.stderr)
         return 1
 
-    token = load_hf_token()
-    if not token:
-        print("Warning: no HF token found — set HF_TOKEN in .env if the model is gated.", file=sys.stderr)
-
-    device = choose_device()
-    print(f"Device : {device.upper()}", file=sys.stderr)
-    print(f"Model  : {args.model}", file=sys.stderr)
+    print(f"Device : {choose_device().upper()}", file=sys.stderr)
+    print(f"Model  : {CANARY_MODEL}", file=sys.stderr)
     print(f"File   : {audio_path}", file=sys.stderr)
-    print(f"Langs  : {args.source_lang} → {target_lang}", file=sys.stderr)
+    print(f"Langs  : {args.source_lang} -> {target_lang}", file=sys.stderr)
 
     print("\nLoading model...", file=sys.stderr)
-    model = load_model(args.model, device)
+    get_canary_model()
     print("Model ready.", file=sys.stderr)
 
     print("Preparing audio...", file=sys.stderr)
     prepared = prepare_audio(audio_path)
-
-    print("Transcribing...", file=sys.stderr)
-    import shutil
     try:
-        outputs = model.transcribe(
+        outputs = get_canary_model().transcribe(
             audio=[prepared],
             source_lang=args.source_lang,
             target_lang=target_lang,
         )
-    finally:
+    except Exception as exc:
+        print(f"Transcription failed: {exc}", file=sys.stderr)
         shutil.rmtree(str(Path(prepared).parent), ignore_errors=True)
+        return 1
 
+    shutil.rmtree(str(Path(prepared).parent), ignore_errors=True)
     if not outputs:
         print("No output from model.", file=sys.stderr)
         return 1
 
     result = outputs[0]
     text = getattr(result, "text", str(result))
-
     print("\n" + "─" * 60)
     print(text)
     print("─" * 60)

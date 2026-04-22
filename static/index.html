@@ -160,7 +160,7 @@
 
     @keyframes spin { to { transform: rotate(360deg); } }
 
-    /* Whisper progress bar */
+    /* Transcript progress bar */
     #whisper-progress-wrap {
       display: flex;
       align-items: center;
@@ -297,6 +297,21 @@
       line-height: 1.7;
     }
 
+    .summary-section + .summary-section {
+      margin-top: 1.25rem;
+      padding-top: 1.1rem;
+      border-top: 1px solid var(--border);
+    }
+
+    .summary-title {
+      margin-bottom: 0.75rem;
+      color: var(--text-muted);
+      font-size: 0.82rem;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+    }
+
     .summary-content strong { color: #c4b5fd; }
 
     .summary-content ul {
@@ -367,7 +382,7 @@
     <!-- Spoiler 2: Raw transcript -->
     <details id="spoiler-transcript" style="display:none">
       <summary>
-        Сырая транскрипция (Whisper)
+        Сырая транскрипция (NeMo Canary)
         <span class="badge" id="badge-transcript">...</span>
       </summary>
       <div class="spoiler-body">
@@ -502,6 +517,30 @@
       return result.join('\n');
     }
 
+    function renderSummarySections(summaryText, russianText) {
+      if (!russianText) {
+        return renderMarkdown(summaryText);
+      }
+
+      const sections = [
+        '<section class="summary-section">',
+        '<div class="summary-title">Оригинал</div>',
+        renderMarkdown(summaryText),
+        '</section>',
+      ];
+
+      if (russianText) {
+        sections.push(
+          '<section class="summary-section">',
+          '<div class="summary-title">Русский перевод</div>',
+          renderMarkdown(russianText),
+          '</section>',
+        );
+      }
+
+      return sections.join('\n');
+    }
+
     function handleEvent(event, payload) {
       switch (event) {
         case 'status':
@@ -513,6 +552,10 @@
 
         case 'ffmpeg_done':
           showSpoiler('ffmpeg', payload.file_info);
+          break;
+
+        case 'frames_progress':
+          setStatus(`Analyzing video frames for speaker context... (frame ${payload.current} of ${payload.total})`);
           break;
 
         case 'transcript_progress':
@@ -530,7 +573,7 @@
           break;
 
         case 'summary_done': {
-          const html = renderMarkdown(payload.text);
+          const html = renderSummarySections(payload.text, payload.russian_text);
           showSpoiler('summary', html, true);
           // Auto-open summary — most important result
           document.getElementById('spoiler-summary').setAttribute('open', '');

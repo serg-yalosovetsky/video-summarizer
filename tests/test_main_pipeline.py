@@ -1,0 +1,137 @@
+import asyncio
+import importlib
+import io
+import json
+import sys
+import unittest
+from pathlib import Path
+from unittest import mock
+
+
+ROOT = Path(__file__).resolve().parents[1]
+if str(ROOT) not in sys.path:
+    sys.path.insert(0, str(ROOT))
+
+
+def install_test_stubs() -> None:
+    return None
+
+
+install_test_stubs()
+main = importlib.import_module("main")
+
+
+def decode_events(messages: list[str]) -> list[dict]:
+    result = []
+    for message in messages:
+        payload = message.removeprefix("data: ").strip()
+        result.append(json.loads(payload))
+    return result
+
+
+class ProcessGeneratorTests(unittest.IsolatedAsyncioTestCase):
+    def test_combine_sources_merges_non_empty_parts(self):
+        combined = main.combine_sources("[00:00:01] hi", "hello chat")
+        self.assertIn("=== Video/Audio Transcript ===", combined)
+        self.assertIn("=== Chat Messages ===", combined)
+
+    def test_is_context_sufficient_requires_real_signal(self):
+        self.assertFalse(main.is_context_sufficient(""))
+        self.assertFalse(main.is_context_sufficient("no people\nno names"))
+        self.assertTrue(
+            main.is_context_sufficient(
+                "\n".join(
+                    [
+                        "meeting room with slide deck on screen",
+                        "Alice Johnson speaking near the projector",
+                        "lower third shows Bob Smith",
+                    ]
+                )
+            )
+        )
+
+    async def test_process_generator_emits_expected_stage_sequence(self):
+        upload = main.UploadFile(
+            filename="demo.mp4",
+            file=io.BytesIO(b"video-bytes"),
+        )
+
+        def fake_convert_to_wav(input_path: str, output_path: str) -> dict:
+            Path(output_path).write_bytes(b"wav")
+            return {
+                "file_info": "demo",
+                "format": "mp4",
+                "duration": "00:00:12",
+                "duration_sec": 12.0,
+                "codec": "aac",
+                "has_video": True,
+            }
+
+        def fake_extract_frames(input_path: str, tmp_dir: str, duration_sec: float) -> list[str]:
+            frame_path = Path(tmp_dir) / "frame_1s.jpg"
+            frame_path.write_bytes(b"frame")
+            return [str(frame_path)]
+
+        def fake_analyze_frames_with_progress(
+            image_paths,
+            async_q,
+            loop,
+            start_index=0,
+            total_hint=None,
+        ):
+            loop.call_soon_threadsafe(
+                async_q.put_nowait,
+                {"current": start_index + 1, "total": total_hint or len(image_paths)},
+            )
+            loop.call_soon_threadsafe(async_q.put_nowait, None)
+            return "[1s] Alice speaking in a meeting room"
+
+        def fake_transcribe_with_canary(
+            wav_path,
+            async_q,
+            loop,
+            source_lang="ru",
+        ):
+            loop.call_soon_threadsafe(async_q.put_nowait, 50)
+            loop.call_soon_threadsafe(async_q.put_nowait, None)
+            return "hello world"
+
+        with (
+            mock.patch.object(main, "convert_to_wav", side_effect=fake_convert_to_wav),
+            mock.patch.object(main, "extract_frames", side_effect=fake_extract_frames),
+            mock.patch.object(
+                main,
+                "analyze_frames_with_progress",
+                side_effect=fake_analyze_frames_with_progress,
+            ),
+            mock.patch.object(
+                main,
+                "transcribe_with_canary",
+                side_effect=fake_transcribe_with_canary,
+            ),
+            mock.patch.object(main, "clean_content", return_value="cleaned transcript"),
+            mock.patch.object(main, "classify_is_meeting", return_value=False),
+            mock.patch.object(main, "generate_summary", return_value="full summary"),
+            mock.patch.object(main, "classify_text_language", return_value="other"),
+            mock.patch.object(main, "translate_summary_to_russian", return_value="russian translation"),
+            mock.patch.object(main, "generate_short_summary", return_value="short summary"),
+        ):
+            chunks = []
+            async for item in main.process_generator(upload, "chat line", "ru"):
+                chunks.append(item)
+
+        events = decode_events(chunks)
+        event_names = [event["event"] for event in events]
+
+        self.assertIn("ffmpeg_done", event_names)
+        self.assertIn("frames_done", event_names)
+        self.assertIn("transcript_done", event_names)
+        self.assertIn("cleaned_done", event_names)
+        self.assertIn("summary_done", event_names)
+        self.assertIn("tldr_done", event_names)
+        self.assertLess(event_names.index("ffmpeg_done"), event_names.index("transcript_done"))
+        self.assertLess(event_names.index("cleaned_done"), event_names.index("summary_done"))
+
+
+if __name__ == "__main__":
+    unittest.main()
