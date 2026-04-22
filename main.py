@@ -32,7 +32,13 @@ from summary import (
 )
 from contextlib import asynccontextmanager
 
-from transcribe import convert_to_wav, get_canary_model, transcribe_with_canary
+from transcribe import (
+    convert_to_wav,
+    get_canary_model,
+    run_diarization,
+    transcribe_by_segments,
+    transcribe_with_canary,
+)
 
 
 async def process_generator(
@@ -116,6 +122,25 @@ async def process_generator(
                 time.monotonic() - t0,
             )
             yield sse("ffmpeg_done", meta)
+
+            diarization_segments: list = []
+            yield sse("status", {"message": "Running speaker diarization..."})
+            log.info("  [pyannote] starting diarization...")
+            t0 = time.monotonic()
+            try:
+                diarization_segments = await loop.run_in_executor(
+                    None, run_diarization, wav_path
+                )
+                log.info(
+                    "  [pyannote] done — %d segments (%.2fs)",
+                    len(diarization_segments),
+                    time.monotonic() - t0,
+                )
+                yield sse("diarization_done", {"segments_count": len(diarization_segments)})
+            except Exception as exc:
+                log.warning(
+                    "  [pyannote] ERROR (non-fatal, falling back to single-pass): %s", exc
+                )
 
             if meta.get("has_video"):
                 yield sse("status", {"message": "Analyzing video frames for speaker context..."})
@@ -219,19 +244,34 @@ async def process_generator(
                 except Exception as exc:
                     log.warning("  [frames] ERROR (non-fatal): %s", exc)
 
-            yield sse("status", {"message": "Transcribing audio with Canary (may take a few minutes)..."})
-            log.info("  [canary] transcribing...")
+            if diarization_segments:
+                yield sse("status", {"message": "Transcribing audio by speaker segments with Canary..."})
+            else:
+                yield sse("status", {"message": "Transcribing audio with Canary (may take a few minutes)..."})
+            log.info("  [canary] transcribing (diarized=%s)...", bool(diarization_segments))
             t0 = time.monotonic()
             try:
                 async_q: asyncio.Queue = asyncio.Queue()
-                future = loop.run_in_executor(
-                    None,
-                    transcribe_with_canary,
-                    wav_path,
-                    async_q,
-                    loop,
-                    source_lang,
-                )
+                if diarization_segments:
+                    future = loop.run_in_executor(
+                        None,
+                        transcribe_by_segments,
+                        wav_path,
+                        diarization_segments,
+                        async_q,
+                        loop,
+                        source_lang,
+                        tmp_dir,
+                    )
+                else:
+                    future = loop.run_in_executor(
+                        None,
+                        transcribe_with_canary,
+                        wav_path,
+                        async_q,
+                        loop,
+                        source_lang,
+                    )
                 while True:
                     pct = await async_q.get()
                     if pct is None:

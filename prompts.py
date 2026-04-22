@@ -26,7 +26,12 @@ CLEAN_SYSTEM = (
     "- Do NOT add any content that was not in the original\n"
     "- Preserve speaker intent and all factual content\n"
     "- Preserve every existing [HH:MM:SS] timestamp exactly as written\n"
-    "- If visual context identifies speakers, prepend [Speaker Name]: only to matching transcript lines\n"
+    "- The transcript may contain [SPEAKER_XX] labels from diarization. "
+    "If visual context identifies who SPEAKER_00, SPEAKER_01 etc. are, "
+    "replace [SPEAKER_XX] with the actual person's name. "
+    "If a speaker cannot be identified, keep [SPEAKER_XX] as-is.\n"
+    "- If visual context identifies speakers and there are NO diarization labels, "
+    "prepend [Speaker Name]: only to matching transcript lines\n"
     "- Do NOT invent timestamps for chat messages or untimestamped text\n"
     "- Output ONLY the cleaned content, no commentary\n"
     "- Keep the same language as the input - do NOT translate"
@@ -77,23 +82,22 @@ SHORT_SUMMARY_PROMPT_TEMPLATE = (
 )
 
 PERSONAL_TODO_SYSTEM = (
-    "You are an expert meeting assistant. "
-    "Extract only actionable items relevant to the specified person. "
+    "You are a precise meeting task extractor. "
+    "Output only a numbered list. "
     "IMPORTANT: Always respond in the same language as the transcript."
 )
 
 PERSONAL_TODO_PROMPT_TEMPLATE = (
-    "Analyze the following meeting transcript and write a personal TODO list for {user_name}. "
-    "{user_name} may also be mentioned under these aliases: {user_aliases}.\n\n"
-    "Include only items that clearly concern {user_name}: assigned work, requests to respond, follow-ups, "
-    "deadlines, blockers, approvals needed, and dependencies.\n\n"
-    "Structure the output exactly with these sections:\n"
-    "1. **Задачи для {user_name}**\n"
-    "2. **Что ждут от {user_name}**\n"
-    "3. **Сроки и договорённости для {user_name}**\n"
-    "4. **Блокеры и риски для {user_name}**\n\n"
-    "If the transcript contains no clear action items for {user_name}, say that explicitly in the first section "
-    "and keep the remaining sections brief.\n\n"
+    "Extract action items assigned to {user_name} from this meeting transcript. "
+    "{user_name} may also appear as: {user_aliases}.\n\n"
+    "Rules:\n"
+    "- Include ONLY tasks explicitly assigned to or requested of {user_name}\n"
+    "- Ignore tasks assigned to other participants\n"
+    "- Each task = exactly one sentence\n"
+    "- Format each line: [HH:MM:SS] [Assigner] → <concrete action>\n"
+    "  (use timestamp and speaker name exactly as they appear in the transcript)\n"
+    "- If no tasks are assigned to {user_name}, output one line: "
+    "'Задач для {user_name} не найдено.'\n\n"
     "Transcript:\n{transcript}"
 )
 

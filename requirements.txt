@@ -9,3 +9,5 @@ torchaudio>=2.1.0
 soundfile>=0.12.1
 nemo_toolkit[asr]>=1.23.0
 requests>=2.31.0
+pyannote.audio>=3.1.0
+desktop-notifier>=6.0.0

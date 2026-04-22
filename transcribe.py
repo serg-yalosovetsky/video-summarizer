@@ -219,6 +219,107 @@ def transcribe_with_canary(
     return ""
 
 
+@lru_cache(maxsize=1)
+def get_diarizer():
+    from pyannote.audio import Pipeline
+
+    log.info("Loading pyannote diarization model...")
+    pipeline = Pipeline.from_pretrained(
+        "pyannote/speaker-diarization-community-1",
+        use_auth_token=HF_TOKEN or True,
+    )
+    log.info("Diarizer ready.")
+    return pipeline
+
+
+def run_diarization(wav_path: str) -> list[tuple[float, float, str]]:
+    """Return sorted list of (start_sec, end_sec, speaker_id) tuples."""
+    pipeline = get_diarizer()
+    diarization = pipeline(wav_path)
+    segments = [
+        (turn.start, turn.end, speaker)
+        for turn, _, speaker in diarization.itertracks(yield_label=True)
+    ]
+    return sorted(segments, key=lambda x: x[0])
+
+
+def merge_speaker_segments(
+    segments: list[tuple[float, float, str]],
+    gap_threshold: float = 1.0,
+    min_duration: float = 0.5,
+) -> list[tuple[float, float, str]]:
+    """Merge adjacent same-speaker segments with small gaps."""
+    if not segments:
+        return []
+    merged = [list(segments[0])]
+    for start, end, speaker in segments[1:]:
+        prev = merged[-1]
+        if speaker == prev[2] and (start - prev[1]) < gap_threshold:
+            prev[1] = end
+        else:
+            merged.append([start, end, speaker])
+    return [(s, e, sp) for s, e, sp in merged if (e - s) >= min_duration]
+
+
+def extract_audio_chunk(wav_path: str, start: float, end: float, out_path: str) -> bool:
+    cmd = [
+        "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
+        "-ss", str(start), "-to", str(end),
+        "-i", wav_path,
+        "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le",
+        out_path,
+    ]
+    result = subprocess.run(cmd, capture_output=True)
+    return result.returncode == 0 and os.path.exists(out_path)
+
+
+def transcribe_by_segments(
+    wav_path: str,
+    segments: list[tuple[float, float, str]],
+    async_q: asyncio.Queue,
+    loop: asyncio.AbstractEventLoop,
+    source_lang: str = "ru",
+    tmp_dir: str | None = None,
+) -> str:
+    """Transcribe audio by speaker segments; return timestamped speaker-labeled transcript."""
+    model = get_canary_model()
+    merged = merge_speaker_segments(segments)
+    results = []
+    _tmp = tmp_dir or tempfile.mkdtemp(prefix="canary_chunks_")
+    cleanup = tmp_dir is None
+    try:
+        total = len(merged)
+        for i, (start, end, speaker) in enumerate(merged, 1):
+            loop.call_soon_threadsafe(async_q.put_nowait, int(i / total * 100))
+            chunk_path = os.path.join(_tmp, f"chunk_{i:04d}.wav")
+            if not extract_audio_chunk(wav_path, start, end, chunk_path):
+                log.warning("  [canary] chunk %d: ffmpeg extraction failed", i)
+                continue
+            try:
+                outputs = model.transcribe(
+                    audio=[chunk_path],
+                    source_lang=source_lang,
+                    target_lang=source_lang,
+                )
+                text = getattr(outputs[0], "text", str(outputs[0])) if outputs else ""
+            except Exception as exc:
+                log.warning("  [canary] chunk %d failed: %s", i, exc)
+                text = ""
+            finally:
+                Path(chunk_path).unlink(missing_ok=True)
+            if text.strip():
+                h = int(start // 3600)
+                m = int((start % 3600) // 60)
+                s = int(start % 60)
+                results.append(f"[{h:02d}:{m:02d}:{s:02d}] [{speaker}]: {text.strip()}")
+            log.info("  [canary] segment %d/%d (%s @ %.1fs) done", i, total, speaker, start)
+    finally:
+        if cleanup:
+            shutil.rmtree(_tmp, ignore_errors=True)
+    loop.call_soon_threadsafe(async_q.put_nowait, None)
+    return "\n".join(results)
+
+
 def prepare_audio(audio_path: str, target_sr: int = 16000) -> str:
     source = Path(audio_path).expanduser().resolve()
     tmpdir = Path(tempfile.mkdtemp(prefix="canary_"))
