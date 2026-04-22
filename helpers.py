@@ -101,6 +101,23 @@ def remove_repetitions(text: str, max_consecutive: int = 2) -> str:
     return "\n".join(result)
 
 
+NTFY_TOPIC = os.environ.get("NTFY_TOPIC", "syalosovetskyi_subscribe_topic")
+NTFY_URL = f"https://ntfy.sh/{NTFY_TOPIC}"
+
+
+async def notify_done(title: str, message: str) -> None:
+    try:
+        httpx.post(NTFY_URL, content=message.encode(), headers={"Title": title}, timeout=5.0)
+    except Exception as exc:
+        log.warning("ntfy notification failed: %s", exc)
+    try:
+        from desktop_notifier import DesktopNotifier
+        notifier = DesktopNotifier()
+        await notifier.send(title=title, message=message)
+    except Exception as exc:
+        log.warning("Desktop notification failed: %s", exc)
+
+
 def call_ollama(prompt: str, system: str = "", *, timeout: float = 900.0) -> str:
     response = httpx.post(
         OLLAMA_URL,

@@ -20,7 +20,7 @@ from frames_analyze import (
     generate_frame_timestamps,
     is_context_sufficient,
 )
-from helpers import LOCAL_TMP, MAX_UPLOAD_BYTES, combine_sources, log, remove_repetitions, sse, tail_text
+from helpers import LOCAL_TMP, MAX_UPLOAD_BYTES, combine_sources, log, notify_done, remove_repetitions, sse, tail_text
 from summary import (
     classify_is_meeting,
     classify_text_language,
@@ -413,7 +413,12 @@ async def process_generator(
             },
         )
 
-        log.info("◄ [%s] Complete - total %.2fs", request_label, time.monotonic() - total_start)
+        elapsed = time.monotonic() - total_start
+        log.info("◄ [%s] Complete - total %.2fs", request_label, elapsed)
+        await notify_done(
+            title="Готово",
+            message=f"{request_label} обработан за {elapsed:.0f}с",
+        )
     finally:
         shutil.rmtree(tmp_dir, ignore_errors=True)
 
