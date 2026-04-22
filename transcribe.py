@@ -1,136 +1,147 @@
 """
-Standalone transcription script — runs faster-whisper on a file and prints progress.
+Standalone transcription script — runs NeMo Canary 1B v2 on a file and prints the transcript.
 
 Usage:
-    python transcribe.py <path/to/file>
+    python transcribe.py <path/to/file> [--source-lang en] [--target-lang en]
 
-The file is first converted to 16 kHz mono WAV via ffmpeg (same as the main app),
-then transcribed with the same WhisperModel settings.
+The file is first converted to 16 kHz mono WAV via torchaudio, then transcribed
+with nvidia/canary-1b-v2.
 """
 
+from __future__ import annotations
+
+import argparse
 import json
 import os
-import subprocess
 import sys
 import tempfile
-import time
+from pathlib import Path
 
-from faster_whisper import WhisperModel
+import torch
+from dotenv import load_dotenv
 
 
-def convert_to_wav(input_path: str, output_path: str) -> float:
-    """Run ffprobe + ffmpeg. Returns duration in seconds."""
-    probe_cmd = [
-        "ffprobe", "-v", "quiet",
-        "-print_format", "json",
-        "-show_format",
-        input_path,
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Transcribe audio/video with NeMo Canary 1B v2.")
+    parser.add_argument("audio", help="Path to audio/video file")
+    parser.add_argument("--source-lang", default="en", help="Source language code (default: en)")
+    parser.add_argument("--target-lang", default=None, help="Target language code (defaults to source)")
+    parser.add_argument(
+        "--model",
+        default="nvidia/canary-1b-v2",
+        help="HuggingFace model name or local .nemo path",
+    )
+    return parser.parse_args()
+
+
+def choose_device() -> str:
+    return "cuda" if torch.cuda.is_available() else "cpu"
+
+
+def load_hf_token() -> str | None:
+    load_dotenv()
+    token = (
+        os.environ.get("HUGGING_FACE_HUB_TOKEN")
+        or os.environ.get("HF_TOKEN")
+        or os.environ.get("HUGGINGFACE_HUB_TOKEN")
+    )
+    if token:
+        os.environ.setdefault("HUGGING_FACE_HUB_TOKEN", token)
+        os.environ.setdefault("HF_TOKEN", token)
+        os.environ.setdefault("HUGGINGFACE_HUB_TOKEN", token)
+    return token
+
+
+def prepare_audio(audio_path: str, target_sr: int = 16000) -> str:
+    """Convert any audio/video to 16 kHz mono WAV using ffmpeg."""
+    import subprocess
+
+    source = Path(audio_path).expanduser().resolve()
+    tmpdir = Path(tempfile.mkdtemp(prefix="canary_"))
+    out_path = tmpdir / f"{source.stem}_mono_{target_sr}.wav"
+
+    cmd = [
+        "ffmpeg", "-y", "-i", str(source),
+        "-ar", str(target_sr), "-ac", "1", "-c:a", "pcm_s16le",
+        str(out_path),
     ]
-    result = subprocess.run(probe_cmd, capture_output=True, check=True)
-    fmt = json.loads(result.stdout).get("format", {})
-    duration = float(fmt.get("duration", 0))
+    result = subprocess.run(cmd, capture_output=True)
+    if result.returncode != 0:
+        raise RuntimeError(result.stderr.decode(errors="replace")[:500])
 
-    ffmpeg_cmd = [
-        "ffmpeg", "-y", "-i", input_path,
-        "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le",
-        output_path,
-    ]
-    subprocess.run(ffmpeg_cmd, capture_output=True, check=True)
-    return duration
+    return str(out_path)
 
 
-def transcribe(wav_path: str, model: WhisperModel, total_duration: float) -> str:
-    segments, info = model.transcribe(wav_path, beam_size=5)
-    total = total_duration or info.duration or 1.0
-    texts = []
-    last_pct = 0
+def load_model(model_name: str, device: str):
+    import requests
+    from nemo.collections.asr.models import ASRModel
 
-    bar_width = 40
-
-    for segment in segments:
-        texts.append(segment.text.strip())
-        pct = min(int(segment.end / total * 100), 99)
-
-        if pct != last_pct:
-            last_pct = pct
-            filled = int(bar_width * pct / 100)
-            bar = "█" * filled + "░" * (bar_width - filled)
-            elapsed = segment.end
-            remaining = (total - segment.end)
-            print(f"\r  [{bar}] {pct:3d}%  {elapsed:.0f}s / {total:.0f}s  (~{remaining:.0f}s left)  ",
-                  end="", flush=True)
-
-    # Final 100%
-    bar = "█" * bar_width
-    print(f"\r  [{bar}] 100%  {total:.0f}s / {total:.0f}s                              ")
-    return " ".join(texts)
-
-
-def main():
-    if len(sys.argv) < 2:
-        print("Usage: python transcribe.py <path/to/file>")
-        sys.exit(1)
-
-    input_path = sys.argv[1]
-    if not os.path.exists(input_path):
-        print(f"File not found: {input_path}")
-        sys.exit(1)
-
-    print(f"\nFile : {input_path}")
-    print(f"Size : {os.path.getsize(input_path) / 1024 / 1024:.1f} MB")
-
-    # Load model — CUDA DLLs load lazily on first encode(), so we warm-up immediately
-    print("\nLoading Whisper model...")
-    t0 = time.monotonic()
+    model_ref = Path(model_name).expanduser()
     try:
-        import numpy as np
-        model = WhisperModel("base", device="cuda", compute_type="float16")
-        mel = model.feature_extractor(np.zeros(16000, dtype=np.float32))
-        model.encode(mel)  # forces cublas64_12.dll to load now
-        print(f"  ready (CUDA)  ({time.monotonic() - t0:.2f}s)")
-    except Exception as e:
-        print(f"  CUDA unavailable ({e}), using CPU")
-        t0 = time.monotonic()
-        model = WhisperModel("base", device="cpu", compute_type="int8")
-        print(f"  ready (CPU)  ({time.monotonic() - t0:.2f}s)")
+        if model_ref.exists():
+            model = ASRModel.restore_from(restore_path=str(model_ref.resolve()))
+        else:
+            model = ASRModel.from_pretrained(model_name=model_name)
+    except requests.exceptions.RequestException as exc:
+        print(f"Failed to download model: {exc}", file=sys.stderr)
+        raise SystemExit(2) from exc
 
-    # Convert
-    print("\n[ffmpeg] converting to 16kHz mono WAV...")
-    t0 = time.monotonic()
-    tmp_dir = tempfile.mkdtemp(dir=os.path.join(os.path.dirname(__file__), "tmp"))
-    wav_path = os.path.join(tmp_dir, "audio.wav")
+    return model.cuda() if device == "cuda" else model.cpu()
+
+
+def main() -> int:
+    args = parse_args()
+    target_lang = args.target_lang or args.source_lang
+
+    audio_path = str(Path(args.audio).expanduser().resolve())
+    if not Path(audio_path).exists():
+        print(f"File not found: {audio_path}", file=sys.stderr)
+        return 1
+
+    token = load_hf_token()
+    if not token:
+        print("Warning: no HF token found — set HF_TOKEN in .env if the model is gated.", file=sys.stderr)
+
+    device = choose_device()
+    print(f"Device : {device.upper()}", file=sys.stderr)
+    print(f"Model  : {args.model}", file=sys.stderr)
+    print(f"File   : {audio_path}", file=sys.stderr)
+    print(f"Langs  : {args.source_lang} → {target_lang}", file=sys.stderr)
+
+    print("\nLoading model...", file=sys.stderr)
+    model = load_model(args.model, device)
+    print("Model ready.", file=sys.stderr)
+
+    print("Preparing audio...", file=sys.stderr)
+    prepared = prepare_audio(audio_path)
+
+    print("Transcribing...", file=sys.stderr)
+    import shutil
     try:
-        duration = convert_to_wav(input_path, wav_path)
-        print(f"  done  ({time.monotonic() - t0:.2f}s)  duration: {int(duration // 60)}:{int(duration % 60):02d}")
-    except FileNotFoundError:
-        print("  ERROR: ffprobe/ffmpeg not found — install FFmpeg and add to PATH")
-        sys.exit(1)
-    except subprocess.CalledProcessError as e:
-        print(f"  ERROR: {e.stderr.decode(errors='replace')[:300]}")
-        sys.exit(1)
+        outputs = model.transcribe(
+            audio=[prepared],
+            source_lang=args.source_lang,
+            target_lang=target_lang,
+        )
+    finally:
+        shutil.rmtree(str(Path(prepared).parent), ignore_errors=True)
 
-    # Transcribe
-    print("\n[whisper] transcribing...")
-    t0 = time.monotonic()
-    text = transcribe(wav_path, model, duration)
-    elapsed = time.monotonic() - t0
-    print(f"  done  ({elapsed:.2f}s)  {len(text)} chars")
+    if not outputs:
+        print("No output from model.", file=sys.stderr)
+        return 1
 
-    # Output
+    result = outputs[0]
+    text = getattr(result, "text", str(result))
+
     print("\n" + "─" * 60)
     print(text)
     print("─" * 60)
 
-    # Optionally save to file
-    out_path = input_path + ".transcript.txt"
-    with open(out_path, "w", encoding="utf-8") as f:
-        f.write(text)
-    print(f"\nSaved to: {out_path}")
-
-    # Cleanup
-    import shutil
-    shutil.rmtree(tmp_dir, ignore_errors=True)
+    out_path = audio_path + ".transcript.txt"
+    Path(out_path).write_text(text, encoding="utf-8")
+    print(f"\nSaved to: {out_path}", file=sys.stderr)
+    return 0
 
 
 if __name__ == "__main__":
-    main()
+    raise SystemExit(main())

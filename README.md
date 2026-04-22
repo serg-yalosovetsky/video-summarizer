@@ -1,0 +1,147 @@
+# Video / Audio Summarizer
+
+A local web app that transcribes audio/video files and produces a cleaned transcript and structured summary — entirely on your own hardware, no cloud APIs.
+
+**Pipeline:**
+1. **FFmpeg** — converts any audio/video to 16 kHz mono WAV
+2. **NVIDIA Canary 1B v2** (NeMo) — speech-to-text transcription
+3. **Gemma 4 27B** (Ollama) — cleans the raw transcript
+4. **Gemma 4 27B** (Ollama) — generates a structured summary
+
+Results stream to the browser in real time via SSE.
+
+---
+
+## Requirements
+
+| Dependency | Purpose |
+|---|---|
+| Python 3.10+ | Runtime |
+| FFmpeg | Audio/video conversion |
+| Ollama | LLM inference (Gemma) |
+| CUDA (optional) | GPU acceleration for Canary |
+
+---
+
+## Installation
+
+### 1. Clone and create a virtual environment
+
+```bash
+git clone <repo-url>
+cd video-summarizer
+python -m venv .venv
+source .venv/bin/activate
+```
+
+### 2. Install Python dependencies
+
+```bash
+pip install -r requirements.txt
+```
+
+> NeMo is a large package. For a CUDA-specific install see the
+> [NeMo installation guide](https://docs.nvidia.com/nemo-framework/user-guide/latest/installation.html).
+
+### 3. Install FFmpeg
+
+**Ubuntu/Debian:**
+```bash
+sudo apt install ffmpeg
+```
+
+**Windows:** Download from [ffmpeg.org](https://ffmpeg.org/download.html) and add to `PATH`.
+
+### 4. Install and start Ollama
+
+```bash
+# Install Ollama (Linux)
+curl -fsSL https://ollama.com/install.sh | sh
+
+# Pull the model
+ollama pull gemma4:27b
+
+# Ollama starts automatically; or run manually:
+ollama serve
+```
+
+### 5. Configure environment (optional)
+
+Create a `.env` file in the project root if `nvidia/canary-1b-v2` is gated on HuggingFace:
+
+```env
+HF_TOKEN=hf_your_token_here
+```
+
+---
+
+## Running the web app
+
+```bash
+uvicorn main:app --host 0.0.0.0 --port 8000
+```
+
+Open [http://localhost:8000](http://localhost:8000), upload a file, and click **Суммаризировать**.
+
+On first run the Canary model is downloaded from HuggingFace (~2 GB) and cached locally.
+
+---
+
+## Standalone transcription
+
+To transcribe a single file from the command line:
+
+```bash
+python transcribe.py path/to/file.mp4
+python transcribe.py path/to/file.wav --source-lang uk --target-lang en
+```
+
+The transcript is printed to stdout and saved as `<file>.transcript.txt`.
+
+**Options:**
+
+| Flag | Default | Description |
+|---|---|---|
+| `--source-lang` | `en` | Source language code |
+| `--target-lang` | same as source | Target language (for translation) |
+| `--model` | `nvidia/canary-1b-v2` | HF model name or local `.nemo` path |
+
+---
+
+## Supported languages (Canary 1B v2)
+
+`en` `de` `es` `fr` and more — see the [model card](https://huggingface.co/nvidia/canary-1b-v2).
+
+---
+
+## Using a local model file
+
+Download the model once and point to it to avoid re-downloading:
+
+```bash
+# Download via huggingface_hub
+python - <<'EOF'
+from huggingface_hub import snapshot_download
+snapshot_download("nvidia/canary-1b-v2", local_dir="./models/canary-1b-v2")
+EOF
+```
+
+Then set in `.env` or pass via `--model`:
+
+```env
+CANARY_MODEL=./models/canary-1b-v2/canary-1b-v2.nemo
+```
+
+---
+
+## Project structure
+
+```
+video-summarizer/
+├── main.py           # FastAPI app + pipeline
+├── transcribe.py     # Standalone CLI transcription script
+├── requirements.txt
+├── static/
+│   └── index.html    # Single-page frontend
+└── .env              # HF token (not committed)
+```
