@@ -1,7 +1,12 @@
 from __future__ import annotations
 
+import math
 import shutil
+import wave
 from functools import lru_cache
+from typing import Any
+
+import numpy as np
 
 from config import settings
 from helpers import HF_TOKEN, log
@@ -12,6 +17,10 @@ PYANNOTE_DEVICE = settings.pyannote_device
 DIARIZATION_GAP_THRESHOLD_SEC = 1.0
 DIARIZATION_MIN_SEGMENT_SEC = 0.5
 DIARIZATION_MAX_SEGMENT_SEC = 20.0
+SILENCE_PEAK_THRESHOLD_DBFS = -45.0
+SILENCE_RMS_THRESHOLD_DBFS = -50.0
+WAV_ACTIVITY_SAMPLE_DURATION_SEC = 15.0
+WAV_ACTIVITY_SAMPLE_POSITIONS = (0.05, 0.5, 0.95)
 
 
 def cuda_diagnostics(torch_module) -> str:
@@ -67,6 +76,160 @@ def get_diarizer():
     return pipeline
 
 
+def _segments_from_itertracks(annotation) -> list[LegacySegment]:
+    return [
+        (float(turn.start), float(turn.end), str(speaker))
+        for turn, _, speaker in annotation.itertracks(yield_label=True)
+    ]
+
+
+def _segments_from_payload(payload: Any) -> list[LegacySegment] | None:
+    if not isinstance(payload, dict):
+        return None
+
+    for key in ("exclusive_diarization", "diarization", "segments"):
+        items = payload.get(key)
+        if items is None:
+            continue
+        return [
+            (
+                float(item["start"]),
+                float(item["end"]),
+                str(item["speaker"]),
+            )
+            for item in items
+        ]
+
+    return None
+
+
+def _extract_diarization_segments(raw_output: Any) -> list[LegacySegment]:
+    candidates = []
+    for attr in ("exclusive_speaker_diarization", "speaker_diarization", "diarization"):
+        if hasattr(raw_output, attr):
+            candidate = getattr(raw_output, attr)
+            if candidate is not None:
+                candidates.append(candidate)
+    candidates.append(raw_output)
+
+    for candidate in candidates:
+        if hasattr(candidate, "itertracks"):
+            return _segments_from_itertracks(candidate)
+
+        serialize = getattr(candidate, "serialize", None)
+        if callable(serialize):
+            serialized = _segments_from_payload(serialize())
+            if serialized is not None:
+                return serialized
+
+        payload_segments = _segments_from_payload(candidate)
+        if payload_segments is not None:
+            return payload_segments
+
+    raise TypeError(f"Unsupported diarization output type: {type(raw_output).__name__}")
+
+
+def _dbfs(amplitude: float) -> float:
+    if amplitude <= 0.0:
+        return -120.0
+    return 20.0 * math.log10(amplitude)
+
+
+def _decode_pcm_frames(raw_frames: bytes, *, sample_width: int, channels: int) -> np.ndarray:
+    dtype_by_width = {
+        1: np.uint8,
+        2: np.int16,
+        4: np.int32,
+    }
+    dtype = dtype_by_width.get(sample_width)
+    if dtype is None:
+        raise ValueError(f"Unsupported WAV sample width: {sample_width}")
+
+    samples = np.frombuffer(raw_frames, dtype=dtype)
+    if samples.size == 0:
+        return np.empty(0, dtype=np.float32)
+
+    if sample_width == 1:
+        normalized = (samples.astype(np.float32) - 128.0) / 128.0
+    elif sample_width == 2:
+        normalized = samples.astype(np.float32) / 32768.0
+    else:
+        normalized = samples.astype(np.float32) / 2147483648.0
+
+    if channels > 1:
+        normalized = normalized.reshape(-1, channels)
+    return normalized.reshape(-1)
+
+
+def _inspect_wav_activity(wav_path: str) -> dict[str, float | int | bool] | None:
+    """
+    Sample a few windows from a PCM WAV and estimate whether it is near-silent.
+    """
+    try:
+        with wave.open(wav_path, "rb") as wav_file:
+            sample_rate = wav_file.getframerate()
+            channels = wav_file.getnchannels()
+            sample_width = wav_file.getsampwidth()
+            total_frames = wav_file.getnframes()
+            if sample_rate <= 0 or total_frames <= 0:
+                return None
+
+            duration_sec = total_frames / sample_rate
+            window_sec = min(WAV_ACTIVITY_SAMPLE_DURATION_SEC, duration_sec)
+            window_frames = max(1, int(window_sec * sample_rate))
+            max_start_sec = max(0.0, duration_sec - window_sec)
+
+            if duration_sec <= window_sec:
+                start_offsets = [0.0]
+            else:
+                starts = []
+                half_window = window_sec / 2.0
+                for position in WAV_ACTIVITY_SAMPLE_POSITIONS:
+                    center_sec = duration_sec * position
+                    start_sec = min(max(center_sec - half_window, 0.0), max_start_sec)
+                    starts.append(round(start_sec, 3))
+                start_offsets = sorted(set(starts))
+
+            peak_levels: list[float] = []
+            rms_levels: list[float] = []
+            for start_sec in start_offsets:
+                start_frame = min(total_frames, max(0, int(start_sec * sample_rate)))
+                frames_to_read = min(window_frames, total_frames - start_frame)
+                if frames_to_read <= 0:
+                    continue
+
+                wav_file.setpos(start_frame)
+                raw_frames = wav_file.readframes(frames_to_read)
+                samples = _decode_pcm_frames(
+                    raw_frames,
+                    sample_width=sample_width,
+                    channels=channels,
+                )
+                if samples.size == 0:
+                    continue
+
+                peak_levels.append(_dbfs(float(np.max(np.abs(samples)))))
+                rms_levels.append(_dbfs(float(np.sqrt(np.mean(samples * samples)))))
+
+            if not peak_levels or not rms_levels:
+                return None
+
+            max_peak_dbfs = max(peak_levels)
+            max_rms_dbfs = max(rms_levels)
+            return {
+                "sampled_windows": len(peak_levels),
+                "max_peak_dbfs": max_peak_dbfs,
+                "max_rms_dbfs": max_rms_dbfs,
+                "likely_silent": (
+                    max_peak_dbfs <= SILENCE_PEAK_THRESHOLD_DBFS
+                    and max_rms_dbfs <= SILENCE_RMS_THRESHOLD_DBFS
+                ),
+            }
+    except (OSError, ValueError, wave.Error) as exc:
+        log.debug("  [pyannote] WAV activity inspection failed for %s: %s", wav_path, exc)
+        return None
+
+
 def run_diarization(wav_path: str) -> list[LegacySegment]:
     """Run speaker diarization and return sorted legacy segments."""
     with start_observation(
@@ -76,12 +239,27 @@ def run_diarization(wav_path: str) -> list[LegacySegment]:
     ) as span:
         pipeline = get_diarizer()
         raw = pipeline(wav_path)
-        annotation = getattr(raw, "speaker_diarization", None) or getattr(raw, "diarization", None) or raw
-        segments = [
-            (turn.start, turn.end, speaker)
-            for turn, _, speaker in annotation.itertracks(yield_label=True)
-        ]
+        segments = _extract_diarization_segments(raw)
         sorted_segments = sorted(segments, key=lambda x: x[0])
+        if not sorted_segments:
+            activity = _inspect_wav_activity(wav_path)
+            if activity is not None:
+                if activity["likely_silent"]:
+                    log.warning(
+                        "  [pyannote] no speaker turns found; audio looks silent or near-silent "
+                        "(peak=%.1f dBFS, rms=%.1f dBFS, sampled_windows=%d)",
+                        activity["max_peak_dbfs"],
+                        activity["max_rms_dbfs"],
+                        activity["sampled_windows"],
+                    )
+                else:
+                    log.warning(
+                        "  [pyannote] no speaker turns found despite non-silent audio "
+                        "(peak=%.1f dBFS, rms=%.1f dBFS, sampled_windows=%d)",
+                        activity["max_peak_dbfs"],
+                        activity["max_rms_dbfs"],
+                        activity["sampled_windows"],
+                    )
         if span is not None:
             span.update(
                 output={

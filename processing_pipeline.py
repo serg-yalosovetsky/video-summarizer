@@ -17,6 +17,12 @@ class PipelineAbort(Exception):
     """Stop request processing after an error event has already been emitted."""
 
 
+@dataclass(frozen=True)
+class UploadTooLargeError(Exception):
+    size_bytes: int
+    limit_bytes: int
+
+
 @dataclass
 class ProcessState:
     tmp_dir: str
@@ -156,6 +162,32 @@ async def _emit_progress_events(
         yield deps.sse(event_name, payload_builder(item))
 
 
+async def _save_upload_file(
+    file: UploadFile,
+    destination_path: str,
+    *,
+    max_bytes: int | None,
+    chunk_size: int = 4 * 1024 * 1024,
+) -> int:
+    bytes_written = 0
+    try:
+        with open(destination_path, "wb") as file_handle:
+            while True:
+                chunk = await file.read(chunk_size)
+                if not chunk:
+                    break
+                bytes_written += len(chunk)
+                if max_bytes is not None and bytes_written > max_bytes:
+                    raise UploadTooLargeError(size_bytes=bytes_written, limit_bytes=max_bytes)
+                file_handle.write(chunk)
+    except Exception:
+        Path(destination_path).unlink(missing_ok=True)
+        raise
+    finally:
+        await file.close()
+    return bytes_written
+
+
 async def _process_upload_and_media(
     state: ProcessState,
     *,
@@ -170,16 +202,31 @@ async def _process_upload_and_media(
     state.input_path = os.path.join(state.tmp_dir, safe_filename)
     state.wav_path = os.path.join(state.tmp_dir, "audio.wav")
 
-    content = await file.read()
-    size_mb = len(content) / (1024 * 1024)
-    if len(content) > deps.settings.max_upload_bytes:
-        deps.log.error("  [upload] ERROR: file exceeds 500 MB limit (%.1f MB)", size_mb)
-        yield deps.sse("error", {"message": "File exceeds 500 MB limit.", "stage": "upload"})
+    try:
+        size_bytes = await _save_upload_file(
+            file,
+            state.input_path,
+            max_bytes=deps.settings.max_upload_bytes,
+        )
+    except UploadTooLargeError as exc:
+        size_mb = exc.size_bytes / (1024 * 1024)
+        limit_mb = exc.limit_bytes / (1024 * 1024)
+        deps.log.error(
+            "  [upload] ERROR: file exceeds configured %.1f MB limit (%.1f MB)",
+            limit_mb,
+            size_mb,
+        )
+        yield deps.sse(
+            "error",
+            {
+                "message": f"File exceeds configured upload limit of {limit_mb:.0f} MB.",
+                "stage": "upload",
+            },
+        )
         raise PipelineAbort
 
+    size_mb = size_bytes / (1024 * 1024)
     deps.log.info("► [%s] Start - %.1f MB", safe_filename, size_mb)
-    with open(state.input_path, "wb") as file_handle:
-        file_handle.write(content)
 
     yield deps.sse("status", {"message": "Converting media with FFmpeg..."})
     deps.log.info("  [ffmpeg] converting...")

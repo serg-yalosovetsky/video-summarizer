@@ -142,27 +142,44 @@ MEETING_SUMMARY_PROMPT_TEMPLATE = (
     "Transcript:\n---\n{transcript}\n---"
 )
 
-SPEAKER_FRAME_SYSTEM = (
-    "You are identifying who is currently speaking in a video conference recording frame. "
-    "Be concise and factual."
+ACTIVE_SPEAKER_DETECT_SYSTEM = "Find the active speaker in a video conference frame."
+
+ACTIVE_SPEAKER_DETECT_PROMPT = (
+    "Find the participant with a glowing, highlighted, or bright border. "
+    "This can be a video panel border or a glowing ring around a circular avatar.\n\n"
+    "Return:\n"
+    "- has_active_speaker: true if any highlighted participant is visible\n"
+    "- speaker_position: the participant position in a 3x3 grid: top-left, top-center, top-right, "
+    "middle-left, middle-center, middle-right, bottom-left, bottom-center, or bottom-right\n"
+    "Use null for speaker_position if no highlighted participant is visible."
 )
 
-SPEAKER_FRAME_PROMPT_TEMPLATE = (
-    "This frame is from a video conference recording captured at {ts}s. "
-    "At this moment {speaker_id} is the active speaker.\n\n"
-    "Fill in each field as described below:\n\n"
-    "caption_name — Read the caption/subtitle text overlay at the bottom of the screen. "
-    "It appears as \"PERSON_NAME: spoken words\". Copy only the name before the colon. "
-    "Set to null if no caption overlay is visible.\n\n"
-    "active_panel_name — Find the participant panel with a glowing, highlighted, or bright-colored border "
-    "(or a glowing ring/halo around a circular avatar). Copy the name label shown on that panel. "
-    "Set to null if no highlighted panel is visible.\n\n"
-    "appearance — Gender, clothing, and hair color of the currently speaking person.\n\n"
-    "position — Exact grid position of the speaking person's panel. "
-    "Divide the frame into a 3×3 grid and pick the cell where the panel is located: "
-    "top-left, top-center, top-right, middle-left, middle-center, middle-right, "
-    "bottom-left, bottom-center, or bottom-right.\n\n"
-    "person_visible — true if any person is clearly visible, false otherwise."
+CAPTION_EXTRACT_SYSTEM = "Extract the most recent speaker name from a caption overlay."
+
+CAPTION_EXTRACT_PROMPT = (
+    "Look only at the caption or transcription window near the bottom-center of the frame.\n"
+    "It is usually a dark box with white text and may contain multiple entries like "
+    "\"NAME: spoken text\".\n\n"
+    "Return:\n"
+    "- has_caption: true if this caption window is visible\n"
+    "- last_speaker_name: only the name from the last visible entry\n"
+    "Use null for last_speaker_name if the caption window is missing or unreadable."
+)
+
+SPEAKER_APPEARANCE_SYSTEM = "Describe a video conference participant at a known position."
+
+SPEAKER_APPEARANCE_PROMPT_TEMPLATE = (
+    "Look only at the participant located at {position} in this frame.\n"
+    "Describe the visible person briefly using only appearance details such as gender, clothing color, "
+    "and hair color. If unclear, leave the description empty."
+)
+
+SPEAKER_NAME_SYSTEM = "Read the participant name label at a known position."
+
+SPEAKER_NAME_PROMPT_TEMPLATE = (
+    "Look only at the participant located at {position} in this frame.\n"
+    "Read the name label shown on that participant panel or avatar. "
+    "Return null if no readable name label is visible."
 )
 
 LANGUAGE_CHECK_SYSTEM = (

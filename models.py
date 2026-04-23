@@ -3,6 +3,47 @@ from __future__ import annotations
 from pydantic import BaseModel, Field
 
 
+class ActiveSpeakerDetection(BaseModel):
+    has_active_speaker: bool = Field(
+        description="Whether a glowing or highlighted active speaker panel/avatar is visible in the frame"
+    )
+    speaker_position: str | None = Field(
+        default=None,
+        description=(
+            "Grid position of the highlighted speaker panel/avatar in the frame. "
+            "One of: top-left, top-center, top-right, middle-left, middle-center, "
+            "middle-right, bottom-left, bottom-center, bottom-right. Null if none found."
+        ),
+    )
+
+
+class CaptionExtraction(BaseModel):
+    has_caption: bool = Field(
+        description="Whether a bottom-center caption/transcription overlay is visible in the frame"
+    )
+    last_speaker_name: str | None = Field(
+        default=None,
+        description=(
+            "Speaker name from the last visible caption entry. "
+            "Null if no caption overlay is visible or no name can be read."
+        ),
+    )
+
+
+class SpeakerAppearance(BaseModel):
+    appearance: str = Field(
+        default="",
+        description="Brief appearance description for the speaker at the detected position",
+    )
+
+
+class SpeakerPanelName(BaseModel):
+    name: str | None = Field(
+        default=None,
+        description="Name label shown on the detected active speaker panel. Null if not visible.",
+    )
+
+
 class SpeakerFrameResult(BaseModel):
     person_visible: bool = Field(description="Whether a person is clearly visible in the frame")
     caption_name: str | None = Field(
@@ -23,9 +64,19 @@ class SpeakerFrameResult(BaseModel):
     appearance: str = Field(default="", description="Brief appearance description: gender, clothing, hair colour")
     position: str = Field(default="", description="Grid position of the speaker's panel in the frame. One of: top-left, top-center, top-right, middle-left, middle-center, middle-right, bottom-left, bottom-center, bottom-right")
 
+    def preferred_name(self) -> str | None:
+        return self.active_panel_name or self.caption_name
+
+    def preferred_name_source(self) -> str:
+        if self.active_panel_name:
+            return "active_border"
+        if self.caption_name:
+            return "caption"
+        return ""
+
     def to_context_str(self, speaker_id: str, ts: int) -> str:
-        name = self.caption_name or self.active_panel_name
-        source = "caption" if self.caption_name else ("active_border" if self.active_panel_name else "")
+        name = self.preferred_name()
+        source = self.preferred_name_source()
         parts = []
         if name:
             parts.append(f"name: {name}")

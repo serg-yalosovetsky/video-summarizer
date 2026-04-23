@@ -97,6 +97,7 @@ OLLAMA_BASE_URL=http://localhost:11434
 OLLAMA_MODEL=gemma4:e4b
 FRAME_MODEL=gemma4:e4b
 CANARY_DEVICE=cuda
+MAX_UPLOAD_MB=0
 ```
 
 `USER_PRIMARY_NAME` and `USER_ALIASES` are used in the personalized summary sections like "What concerns ..." and personal meeting todos.
@@ -108,6 +109,8 @@ If you intentionally want CPU fallback for debugging, set:
 ```env
 CANARY_DEVICE=auto
 ```
+
+`MAX_UPLOAD_MB` is optional. Set it to `0` (or leave it empty) to disable the app-level upload cap, or set a positive number of megabytes if you want the server to reject larger files early.
 
 ---
 

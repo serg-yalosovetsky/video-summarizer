@@ -6,7 +6,9 @@ import json
 import sys
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 
@@ -22,6 +24,7 @@ def install_test_stubs() -> None:
 install_test_stubs()
 main = importlib.import_module("main")
 transcribe = importlib.import_module("transcribe")
+transcribe_diarization = importlib.import_module("transcribe_diarization")
 helpers = importlib.import_module("helpers")
 summary = importlib.import_module("summary")
 frames_analyze = importlib.import_module("frames_analyze")
@@ -34,6 +37,25 @@ def decode_events(messages: list[str]) -> list[dict]:
         payload = message.removeprefix("data: ").strip()
         result.append(json.loads(payload))
     return result
+
+
+class LargeChunkFile:
+    def __init__(self, total_bytes: int, *, fill_byte: bytes = b"x"):
+        self.remaining = total_bytes
+        self.fill_byte = fill_byte
+        self.closed = False
+
+    def read(self, size: int = -1) -> bytes:
+        if self.remaining <= 0:
+            return b""
+        if size is None or size < 0:
+            size = self.remaining
+        chunk_size = min(size, self.remaining)
+        self.remaining -= chunk_size
+        return self.fill_byte * chunk_size
+
+    def close(self) -> None:
+        self.closed = True
 
 
 class ProcessGeneratorTests(unittest.IsolatedAsyncioTestCase):
@@ -146,6 +168,108 @@ class ProcessGeneratorTests(unittest.IsolatedAsyncioTestCase):
         tldr_event = next(event for event in events if event["event"] == "tldr_done")
         self.assertEqual(tldr_event["payload"]["title"], "Краткое саммари")
         self.assertFalse(tldr_event["payload"]["is_meeting"])
+
+    async def test_process_generator_streams_large_upload_when_limit_disabled(self):
+        upload = main.UploadFile(
+            filename="large-demo.mp4",
+            file=LargeChunkFile(12 * 1024 * 1024),
+        )
+
+        def fake_convert_to_wav(input_path: str, output_path: str) -> dict:
+            Path(output_path).write_bytes(b"wav")
+            return {
+                "file_info": "demo",
+                "format": "mp4",
+                "duration": "00:00:12",
+                "duration_sec": 12.0,
+                "codec": "aac",
+                "has_video": True,
+            }
+
+        def fake_extract_frames(input_path: str, tmp_dir: str, duration_sec: float) -> list[str]:
+            frame_path = Path(tmp_dir) / "frame_1s.jpg"
+            frame_path.write_bytes(b"frame")
+            return [str(frame_path)]
+
+        def fake_analyze_frames_with_progress(
+            image_paths,
+            async_q,
+            loop,
+            start_index=0,
+            total_hint=None,
+        ):
+            loop.call_soon_threadsafe(
+                async_q.put_nowait,
+                {"current": start_index + 1, "total": total_hint or len(image_paths)},
+            )
+            loop.call_soon_threadsafe(async_q.put_nowait, None)
+            return "[1s] Alice speaking in a meeting room"
+
+        def fake_transcribe_with_canary(
+            wav_path,
+            async_q,
+            loop,
+            source_lang="ru",
+        ):
+            loop.call_soon_threadsafe(async_q.put_nowait, 100)
+            loop.call_soon_threadsafe(async_q.put_nowait, None)
+            return "hello world"
+
+        patched_settings = replace(main.settings, max_upload_bytes=None)
+        with (
+            mock.patch.object(main, "settings", patched_settings),
+            mock.patch.object(main, "notify_done", new=mock.AsyncMock()),
+            mock.patch.object(main, "convert_to_wav", side_effect=fake_convert_to_wav),
+            mock.patch.object(main, "extract_frames", side_effect=fake_extract_frames),
+            mock.patch.object(
+                main,
+                "analyze_frames_with_progress",
+                side_effect=fake_analyze_frames_with_progress,
+            ),
+            mock.patch.object(
+                main,
+                "transcribe_with_canary",
+                side_effect=fake_transcribe_with_canary,
+            ),
+            mock.patch.object(main, "clean_content", return_value="cleaned transcript"),
+            mock.patch.object(main, "classify_is_meeting", return_value=False),
+            mock.patch.object(main, "generate_summary", return_value="full summary"),
+            mock.patch.object(main, "classify_text_language", return_value="other"),
+            mock.patch.object(main, "translate_summary_to_russian", return_value="russian translation"),
+            mock.patch.object(main, "generate_short_summary", return_value="short summary"),
+            mock.patch.object(main, "generate_personal_todo", return_value="todo summary"),
+        ):
+            chunks = []
+            async for item in main.process_generator(upload, "chat line", "ru"):
+                chunks.append(item)
+
+        events = decode_events(chunks)
+        event_names = [event["event"] for event in events]
+        self.assertIn("ffmpeg_done", event_names)
+        self.assertNotIn("error", event_names)
+
+    async def test_process_generator_rejects_large_upload_when_limit_is_configured(self):
+        upload = main.UploadFile(
+            filename="too-large.mp4",
+            file=LargeChunkFile(6 * 1024 * 1024),
+        )
+
+        patched_settings = replace(main.settings, max_upload_bytes=5 * 1024 * 1024)
+        with (
+            mock.patch.object(main, "settings", patched_settings),
+            mock.patch.object(main, "notify_done", new=mock.AsyncMock()),
+        ):
+            chunks = []
+            async for item in main.process_generator(upload, "", "ru"):
+                chunks.append(item)
+
+        events = decode_events(chunks)
+        self.assertEqual([event["event"] for event in events], ["error"])
+        self.assertEqual(events[0]["payload"]["stage"], "upload")
+        self.assertEqual(
+            events[0]["payload"]["message"],
+            "File exceeds configured upload limit of 5 MB.",
+        )
 
     async def test_transcribe_with_canary_signals_queue_on_error(self):
         class BrokenModel:
@@ -276,6 +400,88 @@ class ProcessGeneratorTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(main.FRAME_MODEL, calls[0][1])
 
 
+class RunDiarizationTests(unittest.TestCase):
+    def test_run_diarization_handles_falsey_annotation_from_diarize_output(self):
+        class FalseyAnnotation:
+            def __bool__(self):
+                return False
+
+            def itertracks(self, yield_label=False):
+                yield (SimpleNamespace(start=1.5, end=3.0), None, "SPEAKER_00")
+
+        class FakeOutput:
+            speaker_diarization = FalseyAnnotation()
+
+        fake_pipeline = mock.Mock(return_value=FakeOutput())
+        with (
+            mock.patch.object(transcribe_diarization, "get_diarizer", return_value=fake_pipeline),
+            mock.patch.object(
+                transcribe_diarization,
+                "start_observation",
+                side_effect=lambda *args, **kwargs: contextlib.nullcontext(None),
+            ),
+        ):
+            segments = transcribe_diarization.run_diarization("audio.wav")
+
+        self.assertEqual(segments, [(1.5, 3.0, "SPEAKER_00")])
+
+    def test_run_diarization_handles_serialized_diarize_output(self):
+        class FakeOutput:
+            def serialize(self):
+                return {
+                    "exclusive_diarization": [
+                        {"start": 0.0, "end": 1.0, "speaker": "SPEAKER_00"},
+                        {"start": 1.0, "end": 2.5, "speaker": "SPEAKER_01"},
+                    ]
+                }
+
+        fake_pipeline = mock.Mock(return_value=FakeOutput())
+        with (
+            mock.patch.object(transcribe_diarization, "get_diarizer", return_value=fake_pipeline),
+            mock.patch.object(
+                transcribe_diarization,
+                "start_observation",
+                side_effect=lambda *args, **kwargs: contextlib.nullcontext(None),
+            ),
+        ):
+            segments = transcribe_diarization.run_diarization("audio.wav")
+
+        self.assertEqual(
+            segments,
+            [
+                (0.0, 1.0, "SPEAKER_00"),
+                (1.0, 2.5, "SPEAKER_01"),
+            ],
+        )
+
+    def test_run_diarization_logs_clear_warning_for_silent_audio(self):
+        fake_pipeline = mock.Mock(return_value={"segments": []})
+        with (
+            mock.patch.object(transcribe_diarization, "get_diarizer", return_value=fake_pipeline),
+            mock.patch.object(
+                transcribe_diarization,
+                "_inspect_wav_activity",
+                return_value={
+                    "sampled_windows": 3,
+                    "max_peak_dbfs": -91.0,
+                    "max_rms_dbfs": -91.0,
+                    "likely_silent": True,
+                },
+            ),
+            mock.patch.object(
+                transcribe_diarization,
+                "start_observation",
+                side_effect=lambda *args, **kwargs: contextlib.nullcontext(None),
+            ),
+            mock.patch.object(transcribe_diarization.log, "warning") as warning_mock,
+        ):
+            segments = transcribe_diarization.run_diarization("audio.wav")
+
+        self.assertEqual(segments, [])
+        warning_mock.assert_called_once()
+        self.assertIn("audio looks silent or near-silent", warning_mock.call_args.args[0])
+
+
 class ChooseDeviceTests(unittest.TestCase):
     def test_choose_device_uses_cuda_when_available(self):
         fake_torch = mock.Mock()
@@ -364,6 +570,28 @@ class ChooseDeviceTests(unittest.TestCase):
 
 
 class AnalyzeSpeakerFramesTests(unittest.IsolatedAsyncioTestCase):
+    @staticmethod
+    def _active(has_active_speaker: bool, speaker_position: str | None = None) -> str:
+        return models.ActiveSpeakerDetection(
+            has_active_speaker=has_active_speaker,
+            speaker_position=speaker_position,
+        ).model_dump_json()
+
+    @staticmethod
+    def _caption(has_caption: bool, last_speaker_name: str | None = None) -> str:
+        return models.CaptionExtraction(
+            has_caption=has_caption,
+            last_speaker_name=last_speaker_name,
+        ).model_dump_json()
+
+    @staticmethod
+    def _appearance(appearance: str) -> str:
+        return models.SpeakerAppearance(appearance=appearance).model_dump_json()
+
+    @staticmethod
+    def _panel_name(name: str | None) -> str:
+        return models.SpeakerPanelName(name=name).model_dump_json()
+
     async def test_analyze_speaker_frames_prefers_named_candidate(self):
         queue = asyncio.Queue()
         loop = asyncio.get_running_loop()
@@ -372,53 +600,51 @@ class AnalyzeSpeakerFramesTests(unittest.IsolatedAsyncioTestCase):
             (30.0, 36.0, "SPEAKER_00"),
             (40.0, 42.0, "SPEAKER_00"),
         ]
-        candidates = [
-            models.SpeakerFrameResult(
-                person_visible=True,
-                caption_name=None,
-                active_panel_name=None,
-                appearance="person in blue shirt",
-                position="top-left",
-            ).model_dump_json(),
-            models.SpeakerFrameResult(
-                person_visible=True,
-                caption_name="Alice",
-                active_panel_name=None,
-                appearance="person in blue shirt",
-                position="top-left",
-            ).model_dump_json(),
+        responses = [
+            self._active(True, "top-left"),
+            self._caption(False, None),
+            self._appearance("person in blue shirt"),
+            self._panel_name(None),
+            self._active(False, None),
+            self._caption(True, "Alice"),
+            self._active(False, None),
+            self._caption(False, None),
         ]
+        extracted_timestamps: list[int] = []
 
         def fake_extract_single_frame(input_path: str, out_path: str, ts: int) -> bool:
+            extracted_timestamps.append(ts)
             Path(out_path).write_bytes(f"frame-{ts}".encode())
             return True
 
-        with tempfile.TemporaryDirectory() as tmp_dir, (
-            mock.patch.object(
-                frames_analyze,
-                "extract_single_frame",
-                side_effect=fake_extract_single_frame,
-            ),
-            mock.patch.object(frames_analyze, "_ollama_vision_post", side_effect=candidates),
-            mock.patch.object(
-                frames_analyze,
-                "start_observation",
-                side_effect=lambda *args, **kwargs: contextlib.nullcontext(None),
-            ),
-        ):
-            result = frames_analyze.analyze_speaker_frames(
-                "video.mp4",
-                tmp_dir,
-                diarization_segments,
-                queue,
-                loop,
-            )
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            with (
+                mock.patch.object(
+                    frames_analyze,
+                    "extract_single_frame",
+                    side_effect=fake_extract_single_frame,
+                ),
+                mock.patch.object(frames_analyze, "_ollama_vision_post", side_effect=responses),
+                mock.patch.object(
+                    frames_analyze,
+                    "start_observation",
+                    side_effect=lambda *args, **kwargs: contextlib.nullcontext(None),
+                ),
+            ):
+                result = frames_analyze.analyze_speaker_frames(
+                    "video.mp4",
+                    tmp_dir,
+                    diarization_segments,
+                    queue,
+                    loop,
+                )
 
         await asyncio.sleep(0)
 
         self.assertIn("[SPEAKER_00 @ 33s]", result)
         self.assertIn("name: Alice", result)
-        self.assertNotIn("[SPEAKER_00 @ 10s]", result)
+        self.assertNotIn("[SPEAKER_00 @ 3s]", result)
+        self.assertEqual(extracted_timestamps, [3, 33, 40])
         self.assertEqual(await queue.get(), {"current": 1, "total": 1})
         self.assertIsNone(await queue.get())
 
@@ -426,43 +652,250 @@ class AnalyzeSpeakerFramesTests(unittest.IsolatedAsyncioTestCase):
         queue = asyncio.Queue()
         loop = asyncio.get_running_loop()
         diarization_segments = [(0.0, 1.0, "SPEAKER_00")]
-        candidate = models.SpeakerFrameResult(
-            person_visible=True,
-            caption_name=None,
-            active_panel_name=None,
-            appearance="person in red sweater",
-            position="middle-center",
-        ).model_dump_json()
+        responses = [
+            self._active(True, "middle-center"),
+            self._caption(False, None),
+            self._appearance("person in red sweater"),
+            self._panel_name(None),
+        ]
 
         def fake_extract_single_frame(input_path: str, out_path: str, ts: int) -> bool:
             Path(out_path).write_bytes(b"frame")
             return True
 
-        with tempfile.TemporaryDirectory() as tmp_dir, (
-            mock.patch.object(
-                frames_analyze,
-                "extract_single_frame",
-                side_effect=fake_extract_single_frame,
-            ),
-            mock.patch.object(frames_analyze, "_ollama_vision_post", return_value=candidate),
-            mock.patch.object(
-                frames_analyze,
-                "start_observation",
-                side_effect=lambda *args, **kwargs: contextlib.nullcontext(None),
-            ),
-        ):
-            result = frames_analyze.analyze_speaker_frames(
-                "video.mp4",
-                tmp_dir,
-                diarization_segments,
-                queue,
-                loop,
-            )
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            with (
+                mock.patch.object(
+                    frames_analyze,
+                    "extract_single_frame",
+                    side_effect=fake_extract_single_frame,
+                ),
+                mock.patch.object(frames_analyze, "_ollama_vision_post", side_effect=responses),
+                mock.patch.object(
+                    frames_analyze,
+                    "start_observation",
+                    side_effect=lambda *args, **kwargs: contextlib.nullcontext(None),
+                ),
+            ):
+                result = frames_analyze.analyze_speaker_frames(
+                    "video.mp4",
+                    tmp_dir,
+                    diarization_segments,
+                    queue,
+                    loop,
+                )
 
         await asyncio.sleep(0)
 
         self.assertIn("[SPEAKER_00 @ 0s]", result)
         self.assertIn("position: middle-center", result)
+
+    async def test_analyze_speaker_frames_checks_all_candidate_frames_before_selecting_best(self):
+        queue = asyncio.Queue()
+        loop = asyncio.get_running_loop()
+        diarization_segments = [
+            (0.0, 20.0, "SPEAKER_00"),
+            (30.0, 36.0, "SPEAKER_00"),
+            (40.0, 42.0, "SPEAKER_00"),
+        ]
+        responses = [
+            self._active(True, "top-left"),
+            self._caption(False, None),
+            self._appearance("person in blue shirt"),
+            self._panel_name(None),
+            self._active(True, "bottom-left"),
+            self._caption(True, "MOHAMMAD"),
+            self._appearance("person in dark shirt"),
+            self._panel_name("LEV"),
+            self._active(False, None),
+            self._caption(False, None),
+        ]
+        extracted_timestamps: list[int] = []
+
+        def fake_extract_single_frame(input_path: str, out_path: str, ts: int) -> bool:
+            extracted_timestamps.append(ts)
+            Path(out_path).write_bytes(f"frame-{ts}".encode())
+            return True
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            with (
+                mock.patch.object(
+                    frames_analyze,
+                    "extract_single_frame",
+                    side_effect=fake_extract_single_frame,
+                ),
+                mock.patch.object(
+                    frames_analyze,
+                    "start_observation",
+                    side_effect=lambda *args, **kwargs: contextlib.nullcontext(None),
+                ),
+            ):
+                with mock.patch.object(
+                    frames_analyze,
+                    "_ollama_vision_post",
+                    side_effect=responses,
+                ) as vision_post:
+                    result = frames_analyze.analyze_speaker_frames(
+                        "video.mp4",
+                        tmp_dir,
+                        diarization_segments,
+                        queue,
+                        loop,
+                    )
+
+        await asyncio.sleep(0)
+
+        self.assertEqual(extracted_timestamps, [3, 33, 40])
+        self.assertEqual(vision_post.call_count, 10)
+        self.assertIn("[SPEAKER_00 @ 33s]", result)
+        self.assertIn("name: LEV", result)
+
+    async def test_analyze_speaker_frames_prefers_glowing_panel_name_on_conflict(self):
+        queue = asyncio.Queue()
+        loop = asyncio.get_running_loop()
+        diarization_segments = [(0.0, 10.0, "SPEAKER_00")]
+        responses = [
+            self._active(True, "middle-left"),
+            self._caption(True, "MOHAMMAD"),
+            self._appearance("person in dark shirt"),
+            self._panel_name("LEV"),
+        ]
+
+        def fake_extract_single_frame(input_path: str, out_path: str, ts: int) -> bool:
+            Path(out_path).write_bytes(b"frame")
+            return True
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            with (
+                mock.patch.object(
+                    frames_analyze,
+                    "extract_single_frame",
+                    side_effect=fake_extract_single_frame,
+                ),
+                mock.patch.object(frames_analyze, "_ollama_vision_post", side_effect=responses),
+                mock.patch.object(
+                    frames_analyze,
+                    "start_observation",
+                    side_effect=lambda *args, **kwargs: contextlib.nullcontext(None),
+                ),
+            ):
+                result = frames_analyze.analyze_speaker_frames(
+                    "video.mp4",
+                    tmp_dir,
+                    diarization_segments,
+                    queue,
+                    loop,
+                )
+
+        await asyncio.sleep(0)
+
+        self.assertIn("name: LEV", result)
+        self.assertIn("name_source: active_border", result)
+        self.assertNotIn("name: MOHAMMAD", result)
+
+    async def test_analyze_speaker_frames_uses_last_name_from_multi_entry_caption(self):
+        queue = asyncio.Queue()
+        loop = asyncio.get_running_loop()
+        diarization_segments = [(0.0, 12.0, "SPEAKER_00")]
+        responses = [
+            self._active(False, None),
+            self._caption(True, "MOHAMMAD M: Yes.\nLEV H: So you tested it"),
+        ]
+
+        def fake_extract_single_frame(input_path: str, out_path: str, ts: int) -> bool:
+            Path(out_path).write_bytes(b"frame")
+            return True
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            with (
+                mock.patch.object(
+                    frames_analyze,
+                    "extract_single_frame",
+                    side_effect=fake_extract_single_frame,
+                ),
+                mock.patch.object(frames_analyze, "_ollama_vision_post", side_effect=responses),
+                mock.patch.object(
+                    frames_analyze,
+                    "start_observation",
+                    side_effect=lambda *args, **kwargs: contextlib.nullcontext(None),
+                ),
+            ):
+                result = frames_analyze.analyze_speaker_frames(
+                    "video.mp4",
+                    tmp_dir,
+                    diarization_segments,
+                    queue,
+                    loop,
+                )
+
+        await asyncio.sleep(0)
+
+        self.assertIn("name: LEV H", result)
+        self.assertNotIn("position:", result)
+
+    async def test_analyze_speaker_frames_keeps_caption_only_fallback_without_position(self):
+        queue = asyncio.Queue()
+        loop = asyncio.get_running_loop()
+        diarization_segments = [(0.0, 12.0, "SPEAKER_00")]
+        responses = [
+            self._active(False, None),
+            self._caption(True, "Alice"),
+        ]
+
+        def fake_extract_single_frame(input_path: str, out_path: str, ts: int) -> bool:
+            Path(out_path).write_bytes(b"frame")
+            return True
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            with (
+                mock.patch.object(
+                    frames_analyze,
+                    "extract_single_frame",
+                    side_effect=fake_extract_single_frame,
+                ),
+                mock.patch.object(
+                    frames_analyze,
+                    "start_observation",
+                    side_effect=lambda *args, **kwargs: contextlib.nullcontext(None),
+                ),
+            ):
+                with mock.patch.object(
+                    frames_analyze,
+                    "_ollama_vision_post",
+                    side_effect=responses,
+                ) as vision_post:
+                    result = frames_analyze.analyze_speaker_frames(
+                        "video.mp4",
+                        tmp_dir,
+                        diarization_segments,
+                        queue,
+                        loop,
+                    )
+
+        await asyncio.sleep(0)
+
+        self.assertEqual(vision_post.call_count, 2)
+        self.assertIn("name: Alice", result)
+        self.assertIn("name_source: caption", result)
+        self.assertNotIn("position:", result)
+        self.assertNotIn("appearance:", result)
+
+
+class SpeakerFrameResultTests(unittest.TestCase):
+    def test_to_context_str_prefers_active_panel_name_over_caption_name(self):
+        result = models.SpeakerFrameResult(
+            person_visible=True,
+            caption_name="MOHAMMAD",
+            active_panel_name="LEV",
+            appearance="person in blue shirt",
+            position="top-left",
+        )
+
+        context = result.to_context_str("SPEAKER_00", 12)
+
+        self.assertIn("name: LEV", context)
+        self.assertIn("name_source: active_border", context)
+        self.assertNotIn("name: MOHAMMAD", context)
 
 
 class SummaryHelperTests(unittest.TestCase):

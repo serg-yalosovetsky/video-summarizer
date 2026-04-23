@@ -17,6 +17,17 @@ def _env_int(name: str, default: int) -> int:
     return int(_env_str(name, str(default)))
 
 
+def _env_optional_int(name: str, default: int | None = None) -> int | None:
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+    raw = raw.strip()
+    if not raw:
+        return default
+    value = int(raw)
+    return value if value > 0 else None
+
+
 def _env_lower(name: str, default: str) -> str:
     return _env_str(name, default).strip().lower()
 
@@ -75,7 +86,7 @@ class Settings:
     local_tmp: Path
     artifacts_dir: Path
     project_memory_path: Path
-    max_upload_bytes: int
+    max_upload_bytes: int | None
     hf_token: str | None
     ollama_url: str
     ollama_model: str
@@ -144,12 +155,14 @@ def build_settings() -> Settings:
         base_dir=base_dir,
     )
 
+    max_upload_mb = _env_optional_int("MAX_UPLOAD_MB", None)
+
     return Settings(
         base_dir=base_dir,
         local_tmp=local_tmp,
         artifacts_dir=artifacts_dir,
         project_memory_path=project_memory_path,
-        max_upload_bytes=max(1, _env_int("MAX_UPLOAD_MB", 500)) * 1024 * 1024,
+        max_upload_bytes=(max_upload_mb * 1024 * 1024) if max_upload_mb else None,
         hf_token=hf_token,
         ollama_url=ollama_url,
         ollama_model=ollama_model,
