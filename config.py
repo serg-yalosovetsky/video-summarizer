@@ -89,6 +89,7 @@ class Settings:
     max_upload_bytes: int | None
     hf_token: str | None
     ollama_url: str
+    ollama_device: str
     ollama_model: str
     ollama_clean_model: str
     ollama_timeout_seconds: int
@@ -109,6 +110,7 @@ class Settings:
     ollama_summary_max_tokens: int
     ollama_clean_max_tokens: int
     ollama_clean_timeout_seconds: int
+    stage_delay_seconds: int
     max_visual_context_chars: int
     langfuse_public_key: str | None
     langfuse_secret_key: str | None
@@ -127,6 +129,11 @@ def build_settings() -> Settings:
         os.environ.setdefault("HUGGINGFACE_HUB_TOKEN", hf_token)
 
     ollama_url = _resolve_ollama_url()
+    ollama_device = _env_lower("OLLAMA_DEVICE", "gpu")
+    if ollama_device not in {"gpu", "auto"}:
+        raise RuntimeError(
+            f"Unsupported OLLAMA_DEVICE={ollama_device!r}. Use one of: gpu, auto."
+        )
     ollama_model = _env_str("OLLAMA_MODEL", "gemma4:e4b")
     ollama_clean_model = _env_str("OLLAMA_CLEAN_MODEL", "gemma4:e2b")
     frame_model = _env_str("FRAME_MODEL", ollama_model)
@@ -166,6 +173,7 @@ def build_settings() -> Settings:
         max_upload_bytes=(max_upload_mb * 1024 * 1024) if max_upload_mb else None,
         hf_token=hf_token,
         ollama_url=ollama_url,
+        ollama_device=ollama_device,
         ollama_model=ollama_model,
         ollama_clean_model=ollama_clean_model,
         ollama_timeout_seconds=_env_int("OLLAMA_TIMEOUT_SECONDS", 900),
@@ -186,6 +194,7 @@ def build_settings() -> Settings:
         ollama_summary_max_tokens=_env_int("OLLAMA_SUMMARY_MAX_TOKENS", 4096),
         ollama_clean_max_tokens=_env_int("OLLAMA_CLEAN_MAX_TOKENS", 4096),
         ollama_clean_timeout_seconds=_env_int("OLLAMA_CLEAN_TIMEOUT_SECONDS", 1800),
+        stage_delay_seconds=max(0, _env_int("STAGE_DELAY_SECONDS", 10)),
         max_visual_context_chars=_env_int("MAX_VISUAL_CONTEXT_CHARS", 2000),
         langfuse_public_key=langfuse_public_key,
         langfuse_secret_key=langfuse_secret_key,

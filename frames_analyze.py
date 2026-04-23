@@ -15,6 +15,7 @@ import httpx
 
 from config import settings
 from helpers import log
+from ollama_debug import save_vision_request
 from models import (
     ActiveSpeakerDetection,
     CaptionExtraction,
@@ -366,6 +367,16 @@ def is_context_sufficient(context: str) -> bool:
 
 def _ollama_vision_post(prompt: str, system: str, b64_image: str, schema: dict) -> str:
     """POST to Ollama vision endpoint with structured output; returns raw response string."""
+    save_vision_request(
+        prompt=prompt,
+        system=system,
+        model=FRAME_MODEL,
+        url=OLLAMA_URL,
+        b64_image=b64_image,
+        schema=schema,
+        timeout=_OLLAMA_TIMEOUT_SECONDS,
+        keep_alive=_OLLAMA_KEEP_ALIVE,
+    )
     started_at = time.monotonic()
     try:
         response = httpx.post(

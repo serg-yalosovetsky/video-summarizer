@@ -94,6 +94,7 @@ USER_PRIMARY_NAME=Сергей
 USER_ALIASES=Сергей,Сергій,Serhii
 HF_TOKEN=hf_your_token_here
 OLLAMA_BASE_URL=http://localhost:11434
+OLLAMA_DEVICE=gpu
 OLLAMA_MODEL=gemma4:e4b
 FRAME_MODEL=gemma4:e4b
 CANARY_DEVICE=cuda
@@ -108,6 +109,13 @@ If you intentionally want CPU fallback for debugging, set:
 
 ```env
 CANARY_DEVICE=auto
+```
+
+The app also defaults to `OLLAMA_DEVICE=gpu` and now refuses to continue if Ollama loads models without GPU usage.
+If you intentionally want to skip that verification for debugging, set:
+
+```env
+OLLAMA_DEVICE=auto
 ```
 
 `MAX_UPLOAD_MB` is optional. Set it to `0` (or leave it empty) to disable the app-level upload cap, or set a positive number of megabytes if you want the server to reject larger files early.

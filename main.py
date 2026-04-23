@@ -202,7 +202,8 @@ async def process_generator(
 async def lifespan(app):
     loop = asyncio.get_event_loop()
     log.info(
-        "Checking Ollama at startup (text=%s, clean=%s, frames=%s)...",
+        "Checking Ollama at startup (device=%s, text=%s, clean=%s, frames=%s)...",
+        settings.ollama_device,
         settings.ollama_model,
         settings.ollama_clean_model,
         settings.frame_model,

@@ -3,6 +3,7 @@ __pycache__/
 *.pyc
 *.pyo
 tmp/
+temp/
 .env
 .omx
 artifacts/

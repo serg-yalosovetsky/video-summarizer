@@ -162,6 +162,21 @@ async def _emit_progress_events(
         yield deps.sse(event_name, payload_builder(item))
 
 
+async def _sleep_between_stages(
+    deps: PipelineDeps,
+    next_stage_label: str,
+):
+    delay_seconds = max(0, int(getattr(deps.settings, "stage_delay_seconds", 0)))
+    if delay_seconds <= 0:
+        return
+    deps.log.info("  [pause] waiting %ds before %s...", delay_seconds, next_stage_label)
+    yield deps.sse(
+        "status",
+        {"message": f"Waiting {delay_seconds} seconds before {next_stage_label}..."},
+    )
+    await asyncio.sleep(delay_seconds)
+
+
 async def _save_upload_file(
     file: UploadFile,
     destination_path: str,
@@ -960,7 +975,11 @@ async def process_generator(
                     deps=deps,
                 ):
                     yield event
+                async for event in _sleep_between_stages(deps, "frame analysis"):
+                    yield event
                 async for event in _analyze_frames_step(state, loop=loop, deps=deps):
+                    yield event
+                async for event in _sleep_between_stages(deps, "transcription"):
                     yield event
                 async for event in _transcribe_step(state, loop=loop, deps=deps):
                     yield event
@@ -972,7 +991,11 @@ async def process_generator(
             sse_event = _substitute_speaker_names_step(state, deps=deps)
             if sse_event:
                 yield sse_event
+            async for event in _sleep_between_stages(deps, "meeting classification"):
+                yield event
             await _classify_meeting_step(state, loop=loop, deps=deps)
+            async for event in _sleep_between_stages(deps, "summary generation"):
+                yield event
             async for event in _summary_and_tldr_step(state, loop=loop, root_span=root_span, deps=deps):
                 yield event
         except PipelineAbort:

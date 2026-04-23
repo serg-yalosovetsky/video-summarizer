@@ -125,7 +125,10 @@ class ProcessGeneratorTests(unittest.IsolatedAsyncioTestCase):
             loop.call_soon_threadsafe(async_q.put_nowait, None)
             return "hello world"
 
+        patched_settings = replace(main.settings, stage_delay_seconds=0)
         with (
+            mock.patch.object(main, "settings", patched_settings),
+            mock.patch.object(main, "notify_done", new=mock.AsyncMock()),
             mock.patch.object(main, "convert_to_wav", side_effect=fake_convert_to_wav),
             mock.patch.object(main, "extract_frames", side_effect=fake_extract_frames),
             mock.patch.object(
@@ -215,7 +218,7 @@ class ProcessGeneratorTests(unittest.IsolatedAsyncioTestCase):
             loop.call_soon_threadsafe(async_q.put_nowait, None)
             return "hello world"
 
-        patched_settings = replace(main.settings, max_upload_bytes=None)
+        patched_settings = replace(main.settings, max_upload_bytes=None, stage_delay_seconds=0)
         with (
             mock.patch.object(main, "settings", patched_settings),
             mock.patch.object(main, "notify_done", new=mock.AsyncMock()),
@@ -334,6 +337,8 @@ class ProcessGeneratorTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_process_generator_emits_personal_todo_for_meetings(self):
         with (
+            mock.patch.object(main, "settings", replace(main.settings, stage_delay_seconds=0)),
+            mock.patch.object(main, "notify_done", new=mock.AsyncMock()),
             mock.patch.object(main, "clean_content", return_value="meeting transcript"),
             mock.patch.object(main, "classify_is_meeting", return_value=True),
             mock.patch.object(main, "generate_summary", return_value="meeting summary"),
@@ -353,6 +358,8 @@ class ProcessGeneratorTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_process_generator_retries_truncated_tldr(self):
         with (
+            mock.patch.object(main, "settings", replace(main.settings, stage_delay_seconds=0)),
+            mock.patch.object(main, "notify_done", new=mock.AsyncMock()),
             mock.patch.object(main, "clean_content", return_value="discussion transcript"),
             mock.patch.object(main, "classify_is_meeting", return_value=False),
             mock.patch.object(main, "generate_summary", return_value="Full summary."),
@@ -398,6 +405,75 @@ class ProcessGeneratorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(calls[1][0], "canary")
         self.assertIn(main.OLLAMA_MODEL, calls[0][1])
         self.assertIn(main.FRAME_MODEL, calls[0][1])
+
+
+class OllamaReadyTests(unittest.TestCase):
+    @staticmethod
+    def _response(payload: dict):
+        response = mock.Mock()
+        response.raise_for_status.return_value = None
+        response.json.return_value = payload
+        return response
+
+    def test_ensure_ollama_ready_requires_gpu_when_configured(self):
+        tags_response = self._response({"models": [{"name": "gemma4:e4b"}]})
+        ps_response = self._response(
+            {
+                "models": [
+                    {
+                        "name": "gemma4:e4b",
+                        "processor": "100% GPU",
+                        "size_vram": 123456,
+                    }
+                ]
+            }
+        )
+        warm_response = self._response({"response": "ok"})
+
+        with (
+            mock.patch.object(helpers, "settings", replace(helpers.settings, ollama_device="gpu")),
+            mock.patch.object(helpers.httpx, "get", side_effect=[tags_response, ps_response]),
+            mock.patch.object(helpers.httpx, "post", return_value=warm_response) as post_mock,
+        ):
+            helpers.ensure_ollama_ready("gemma4:e4b")
+
+        post_mock.assert_called_once()
+
+    def test_ensure_ollama_ready_rejects_cpu_only_ollama(self):
+        tags_response = self._response({"models": [{"name": "gemma4:e4b"}]})
+        ps_response = self._response(
+            {
+                "models": [
+                    {
+                        "name": "gemma4:e4b",
+                        "processor": "100% CPU",
+                        "size_vram": 0,
+                    }
+                ]
+            }
+        )
+        warm_response = self._response({"response": "ok"})
+
+        with (
+            mock.patch.object(helpers, "settings", replace(helpers.settings, ollama_device="gpu")),
+            mock.patch.object(helpers.httpx, "get", side_effect=[tags_response, ps_response]),
+            mock.patch.object(helpers.httpx, "post", return_value=warm_response),
+        ):
+            with self.assertRaisesRegex(RuntimeError, "not using the GPU"):
+                helpers.ensure_ollama_ready("gemma4:e4b")
+
+    def test_ensure_ollama_ready_skips_gpu_verification_in_auto_mode(self):
+        tags_response = self._response({"models": [{"name": "gemma4:e4b"}]})
+
+        with (
+            mock.patch.object(helpers, "settings", replace(helpers.settings, ollama_device="auto")),
+            mock.patch.object(helpers.httpx, "get", return_value=tags_response) as get_mock,
+            mock.patch.object(helpers.httpx, "post") as post_mock,
+        ):
+            helpers.ensure_ollama_ready("gemma4:e4b")
+
+        self.assertEqual(get_mock.call_count, 1)
+        post_mock.assert_not_called()
 
 
 class RunDiarizationTests(unittest.TestCase):
