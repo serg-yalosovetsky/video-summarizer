@@ -59,16 +59,20 @@ CLEAN_PROMPT_TEMPLATE = (
 
 SUMMARY_SYSTEM = (
     "You are an expert content summarizer. "
-    "Create clear, structured summaries that capture the key information. "
+    "Create detailed, thorough summaries that cover all important information. "
+    "Be comprehensive — do not omit details, examples, or context. "
     "IMPORTANT: Always respond in the same language as the input."
 )
 
 SUMMARY_PROMPT_TEMPLATE = (
-    "Read the transcript below and provide a comprehensive summary in the SAME LANGUAGE as the transcript.\n\n"
+    "Read the transcript below and provide a DETAILED and COMPREHENSIVE summary in the SAME LANGUAGE as the transcript.\n\n"
+    "Be thorough — cover every topic, argument, and point discussed. "
+    "Do not skip examples, numbers, names, or context. The summary should be long and detailed, not brief.\n\n"
     "The summary must include:\n\n"
     "1. **Main Topic**: What this content is about in 1-2 sentences\n"
-    "2. **Key Points**: The most important points covered (bullet list)\n"
-    "3. **Details**: Relevant supporting information or context\n"
+    "2. **Key Points**: All important points covered (bullet list — include every significant point)\n"
+    "3. **Details**: Thorough supporting information — examples, numbers, names, quotes, reasoning, context, "
+    "and any other relevant details from the transcript\n"
     "4. **What concerns {user_name}**: highlight all mentions, tasks, requests, blockers, decisions, risks, or follow-ups "
     "that concern {user_name} or these aliases: {user_aliases}. If there is nothing relevant, say so explicitly.\n"
     "5. **Conclusion**: Main takeaway or outcome\n\n"
@@ -76,13 +80,13 @@ SUMMARY_PROMPT_TEMPLATE = (
 )
 
 SHORT_SUMMARY_PROMPT_TEMPLATE = (
-    "Read the transcript below and write a structured short summary (approximately 10% of the original length).\n\n"
+    "Read the transcript below and write a brief TLDR (short summary, approximately 10% of the original length).\n\n"
     "If the transcript is about a problem or discussion, structure as:\n"
     "- **Problem**: what issue is being addressed\n"
     "- **Ways to solve**: approaches or actions taken/proposed\n"
     "- **Blockers**: obstacles preventing resolution\n"
     "- **Estimated resolution**: timeframe or next steps if mentioned\n\n"
-    "Otherwise write a plain structured summary of the key points.\n\n"
+    "Otherwise write a plain structured summary of the key points only.\n\n"
     "Do not stop mid-sentence. Make sure the final line is complete.\n\n"
     "Use the SAME LANGUAGE as the transcript. Output only the summary.\n\n"
     "Transcript:\n---\n{transcript}\n---"
@@ -122,19 +126,20 @@ MEETING_DETECTION_PROMPT = (
 
 MEETING_SUMMARY_SYSTEM = (
     "You are an expert meeting analyst. "
-    "Create clear, structured meeting summaries. "
+    "Create detailed, thorough meeting summaries that cover all decisions, discussions, and details. "
     "IMPORTANT: Always respond in the same language as the transcript."
 )
 
 MEETING_SUMMARY_PROMPT_TEMPLATE = (
-    "Read the meeting transcript below and produce a structured summary "
+    "Read the meeting transcript below and produce a DETAILED and COMPREHENSIVE structured summary "
     "in the SAME LANGUAGE as the transcript.\n\n"
+    "Be thorough — cover all discussion points, decisions, arguments, and context. Do not omit details.\n\n"
     "The summary must include exactly these sections:\n\n"
     "1. **Тема встречи**: What the meeting was about (1-2 sentences)\n"
     "2. **Участники и роли**: List each participant with their role or position if identifiable\n"
-    "3. **Проблема / задача**: The main problem or goal the meeting addressed\n"
-    "4. **Варианты решения**: Approaches, options, or solutions discussed\n"
-    "5. **Договорённости**: Concrete action items — who does what and by when (if mentioned)\n"
+    "3. **Проблема / задача**: The main problem or goal the meeting addressed — include all context and background discussed\n"
+    "4. **Варианты решения**: All approaches, options, or solutions discussed — include arguments for/against each\n"
+    "5. **Договорённости**: Concrete action items — who does what and by when (if mentioned); include all details\n"
     "6. **Что касается {user_name}**: separately highlight all mentions, tasks, responsibilities, blockers, approvals, "
     "deadlines, decisions, and follow-ups related to {user_name} or these aliases: {user_aliases}. "
     "If nothing concerns {user_name}, say so explicitly.\n"

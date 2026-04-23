@@ -181,7 +181,7 @@ def build_settings() -> Settings:
         user_profile_overridden=user_profile_overridden,
         ntfy_topic=ntfy_topic,
         ntfy_url=_env_str("NTFY_URL", f"https://ntfy.sh/{ntfy_topic}"),
-        ollama_num_ctx=_env_int("OLLAMA_NUM_CTX", 32768),
+        ollama_num_ctx=_env_int("OLLAMA_NUM_CTX", 12288),
         ollama_summary_max_tokens=_env_int("OLLAMA_SUMMARY_MAX_TOKENS", 4096),
         ollama_clean_max_tokens=_env_int("OLLAMA_CLEAN_MAX_TOKENS", 4096),
         max_visual_context_chars=_env_int("MAX_VISUAL_CONTEXT_CHARS", 2000),
