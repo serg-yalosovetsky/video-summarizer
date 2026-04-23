@@ -384,6 +384,7 @@ def clean_content(transcript: str, visual_context: str = "") -> str:
         CLEAN_SYSTEM,
         model=OLLAMA_CLEAN_MODEL,
         options=OLLAMA_CLEAN_OPTIONS,
+        timeout=settings.ollama_clean_timeout_seconds,
     )
     if preserves_timestamp_structure(normalized_transcript, cleaned):
         return cleaned

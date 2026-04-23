@@ -108,6 +108,7 @@ class Settings:
     ollama_num_ctx: int
     ollama_summary_max_tokens: int
     ollama_clean_max_tokens: int
+    ollama_clean_timeout_seconds: int
     max_visual_context_chars: int
     langfuse_public_key: str | None
     langfuse_secret_key: str | None
@@ -127,7 +128,7 @@ def build_settings() -> Settings:
 
     ollama_url = _resolve_ollama_url()
     ollama_model = _env_str("OLLAMA_MODEL", "gemma4:e4b")
-    ollama_clean_model = _env_str("OLLAMA_CLEAN_MODEL", ollama_model)
+    ollama_clean_model = _env_str("OLLAMA_CLEAN_MODEL", "gemma4:e2b")
     frame_model = _env_str("FRAME_MODEL", ollama_model)
     ntfy_topic = _env_str("NTFY_TOPIC", "syalosovetskyi_subscribe_topic")
     langfuse_public_key = os.environ.get("LANGFUSE_PUBLIC_KEY") or None
@@ -184,6 +185,7 @@ def build_settings() -> Settings:
         ollama_num_ctx=_env_int("OLLAMA_NUM_CTX", 12288),
         ollama_summary_max_tokens=_env_int("OLLAMA_SUMMARY_MAX_TOKENS", 4096),
         ollama_clean_max_tokens=_env_int("OLLAMA_CLEAN_MAX_TOKENS", 4096),
+        ollama_clean_timeout_seconds=_env_int("OLLAMA_CLEAN_TIMEOUT_SECONDS", 1800),
         max_visual_context_chars=_env_int("MAX_VISUAL_CONTEXT_CHARS", 2000),
         langfuse_public_key=langfuse_public_key,
         langfuse_secret_key=langfuse_secret_key,
