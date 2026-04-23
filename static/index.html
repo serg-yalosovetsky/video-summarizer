@@ -346,7 +346,22 @@
       margin-bottom: 0.5rem;
       padding-bottom: 0.4rem;
       border-bottom: 1px solid var(--border);
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
     }
+
+    #timer-hide-btn {
+      background: none;
+      border: none;
+      color: var(--text-muted);
+      cursor: pointer;
+      font-size: 0.75rem;
+      line-height: 1;
+      padding: 0 0 0 0.4rem;
+      opacity: 0.6;
+    }
+    #timer-hide-btn:hover { opacity: 1; }
 
     .timer-row {
       display: flex;
@@ -498,7 +513,7 @@
   </main>
 
   <div id="timer-widget" style="display:none">
-    <div id="timer-header">Pipeline</div>
+    <div id="timer-header">Pipeline<button id="timer-hide-btn" title="Hide" onclick="document.getElementById('timer-widget').style.display='none'">✕</button></div>
     <div id="timer-rows"></div>
     <div id="timer-total">
       <span>Total</span>

@@ -11,7 +11,10 @@ import httpx
 from dotenv import load_dotenv
 
 
-load_dotenv()
+check = load_dotenv()
+print(f"Loaded .env: {check}")
+print(f"HF_TOKEN: {os.environ.get('HF_TOKEN')}")
+print(f"OLLAMA_BASE_URL: {os.environ.get('OLLAMA_BASE_URL')}")
 
 HF_TOKEN = (
     os.environ.get("HUGGING_FACE_HUB_TOKEN")
@@ -59,6 +62,7 @@ for _handler in logging.getLogger().handlers:
 
 def ollama_base_url() -> str:
     """Resolve Ollama host. Supports OLLAMA_BASE_URL / OLLAMA_HOST / OLLAMA_URL."""
+    load_dotenv()
     host = (
         os.environ.get("OLLAMA_BASE_URL")
         or os.environ.get("OLLAMA_HOST")
@@ -174,22 +178,35 @@ NTFY_TOPIC = os.environ.get("NTFY_TOPIC", "syalosovetskyi_subscribe_topic")
 NTFY_URL = f"https://ntfy.sh/{NTFY_TOPIC}"
 
 
+def _ntfy_payload(title: str, message: str) -> dict:
+    return {
+        "topic": NTFY_TOPIC,
+        "title": title,
+        "message": message,
+        "priority": 3,
+        "tags": ["white_check_mark"],
+    }
+
+
+def _desktop_notifications_available() -> bool:
+    return bool(os.environ.get("DBUS_SESSION_BUS_ADDRESS")) and bool(
+        os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")
+    )
+
+
 async def notify_done(title: str, message: str) -> None:
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
-            await client.post(
-                NTFY_URL,
-                content=message.encode(),
-                headers={
-                    "Title": title,
-                    "Priority": "default",
-                    "Tags": "white_check_mark",
-                },
-            )
+            response = await client.post(NTFY_URL, json=_ntfy_payload(title, message))
+            response.raise_for_status()
     except Exception as exc:
         log.warning("ntfy notification failed: %s", exc)
+    if not _desktop_notifications_available():
+        log.info("Desktop notifications unavailable in this session; skipping local toast")
+        return
     try:
         from desktop_notifier import DesktopNotifier
+
         notifier = DesktopNotifier()
         await notifier.send(title=title, message=message)
     except Exception as exc:

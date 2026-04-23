@@ -20,6 +20,10 @@ from helpers import HF_TOKEN, log, tail_text
 
 CANARY_MODEL = os.environ.get("CANARY_MODEL", "nvidia/canary-1b-v2")
 CANARY_DEVICE = os.environ.get("CANARY_DEVICE", "cuda").strip().lower()
+CANARY_SEGMENT_BATCH_SIZE = max(
+    1,
+    int(os.environ.get("CANARY_SEGMENT_BATCH_SIZE", "8")),
+)
 
 
 def parse_args() -> argparse.Namespace:
@@ -276,6 +280,10 @@ def extract_audio_chunk(wav_path: str, start: float, end: float, out_path: str) 
     return result.returncode == 0 and os.path.exists(out_path)
 
 
+def batched(items: list[tuple[float, float, str, str]], batch_size: int) -> list[list[tuple[float, float, str, str]]]:
+    return [items[i : i + batch_size] for i in range(0, len(items), batch_size)]
+
+
 def transcribe_by_segments(
     wav_path: str,
     segments: list[tuple[float, float, str]],
@@ -292,30 +300,55 @@ def transcribe_by_segments(
     cleanup = tmp_dir is None
     try:
         total = len(merged)
+        prepared_chunks: list[tuple[float, float, str, str]] = []
         for i, (start, end, speaker) in enumerate(merged, 1):
-            loop.call_soon_threadsafe(async_q.put_nowait, int(i / total * 100))
             chunk_path = os.path.join(_tmp, f"chunk_{i:04d}.wav")
             if not extract_audio_chunk(wav_path, start, end, chunk_path):
                 log.warning("  [canary] chunk %d: ffmpeg extraction failed", i)
                 continue
+            prepared_chunks.append((start, end, speaker, chunk_path))
+
+        processed = 0
+        for batch in batched(prepared_chunks, CANARY_SEGMENT_BATCH_SIZE):
+            audio_paths = [chunk_path for _, _, _, chunk_path in batch]
+            texts: list[str]
             try:
                 outputs = model.transcribe(
-                    audio=[chunk_path],
+                    audio=audio_paths,
                     source_lang=source_lang,
                     target_lang=source_lang,
                 )
-                text = getattr(outputs[0], "text", str(outputs[0])) if outputs else ""
+                texts = [
+                    getattr(output, "text", str(output)).strip()
+                    for output in (outputs or [])
+                ]
             except Exception as exc:
-                log.warning("  [canary] chunk %d failed: %s", i, exc)
-                text = ""
-            finally:
-                Path(chunk_path).unlink(missing_ok=True)
-            if text.strip():
-                h = int(start // 3600)
-                m = int((start % 3600) // 60)
-                s = int(start % 60)
-                results.append(f"[{h:02d}:{m:02d}:{s:02d}] [{speaker}]: {text.strip()}")
-            log.info("  [canary] segment %d/%d (%s @ %.1fs) done", i, total, speaker, start)
+                for _, _, _, chunk_path in batch:
+                    Path(chunk_path).unlink(missing_ok=True)
+                failed_range = f"{processed + 1}-{processed + len(batch)}"
+                log.warning("  [canary] chunk batch %s failed: %s", failed_range, exc)
+                texts = [""] * len(batch)
+            else:
+                if len(texts) < len(batch):
+                    texts.extend([""] * (len(batch) - len(texts)))
+                for _, _, _, chunk_path in batch:
+                    Path(chunk_path).unlink(missing_ok=True)
+
+            for (start, _, speaker, _), text in zip(batch, texts):
+                processed += 1
+                loop.call_soon_threadsafe(async_q.put_nowait, int(processed / total * 100))
+                if text:
+                    h = int(start // 3600)
+                    m = int((start % 3600) // 60)
+                    s = int(start % 60)
+                    results.append(f"[{h:02d}:{m:02d}:{s:02d}] [{speaker}]: {text}")
+                log.info(
+                    "  [canary] segment %d/%d (%s @ %.1fs) done",
+                    processed,
+                    total,
+                    speaker,
+                    start,
+                )
     finally:
         if cleanup:
             shutil.rmtree(_tmp, ignore_errors=True)

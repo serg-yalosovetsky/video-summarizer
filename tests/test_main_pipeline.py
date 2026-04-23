@@ -20,6 +20,7 @@ def install_test_stubs() -> None:
 install_test_stubs()
 main = importlib.import_module("main")
 transcribe = importlib.import_module("transcribe")
+helpers = importlib.import_module("helpers")
 
 
 def decode_events(messages: list[str]) -> list[dict]:
@@ -154,6 +155,50 @@ class ProcessGeneratorTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(progress, 1)
         self.assertIsNone(done)
 
+    async def test_transcribe_by_segments_batches_canary_calls(self):
+        class FakeOutput:
+            def __init__(self, text):
+                self.text = text
+
+        class FakeModel:
+            def __init__(self):
+                self.calls = []
+
+            def transcribe(self, **kwargs):
+                self.calls.append(kwargs["audio"])
+                return [FakeOutput(f"text-{i}") for i, _ in enumerate(kwargs["audio"], 1)]
+
+        queue = asyncio.Queue()
+        loop = asyncio.get_running_loop()
+        fake_model = FakeModel()
+        segments = [
+            (0.0, 1.0, "SPEAKER_00"),
+            (2.0, 3.0, "SPEAKER_01"),
+            (4.0, 5.0, "SPEAKER_02"),
+        ]
+
+        def fake_extract_audio_chunk(wav_path: str, start: float, end: float, out_path: str) -> bool:
+            Path(out_path).write_bytes(b"wav")
+            return True
+
+        with (
+            mock.patch.object(transcribe, "get_canary_model", return_value=fake_model),
+            mock.patch.object(transcribe, "extract_audio_chunk", side_effect=fake_extract_audio_chunk),
+            mock.patch.object(transcribe, "CANARY_SEGMENT_BATCH_SIZE", 2),
+        ):
+            text = transcribe.transcribe_by_segments("audio.wav", segments, queue, loop, "ru")
+
+        self.assertEqual(len(fake_model.calls), 2)
+        self.assertEqual(len(fake_model.calls[0]), 2)
+        self.assertEqual(len(fake_model.calls[1]), 1)
+        self.assertIn("[00:00:00] [SPEAKER_00]: text-1", text)
+        self.assertIn("[00:00:02] [SPEAKER_01]: text-2", text)
+        self.assertIn("[00:00:04] [SPEAKER_02]: text-1", text)
+        self.assertEqual(await queue.get(), 33)
+        self.assertEqual(await queue.get(), 66)
+        self.assertEqual(await queue.get(), 100)
+        self.assertIsNone(await queue.get())
+
     async def test_process_generator_emits_personal_todo_for_meetings(self):
         with (
             mock.patch.object(main, "clean_content", return_value="meeting transcript"),
@@ -229,6 +274,49 @@ class ChooseDeviceTests(unittest.TestCase):
             mock.patch.dict(sys.modules, {"torch": fake_torch}),
         ):
             self.assertEqual(transcribe.choose_device(), "cpu")
+
+
+class NotificationTests(unittest.IsolatedAsyncioTestCase):
+    def test_ntfy_payload_supports_unicode_title(self):
+        payload = helpers._ntfy_payload("Готово", "Видео обработано")
+
+        self.assertEqual(payload["topic"], helpers.NTFY_TOPIC)
+        self.assertEqual(payload["title"], "Готово")
+        self.assertEqual(payload["message"], "Видео обработано")
+        self.assertEqual(payload["priority"], 3)
+        self.assertEqual(payload["tags"], ["white_check_mark"])
+
+    def test_desktop_notifications_require_gui_and_dbus(self):
+        with mock.patch.dict(helpers.os.environ, {}, clear=True):
+            self.assertFalse(helpers._desktop_notifications_available())
+
+        with mock.patch.dict(
+            helpers.os.environ,
+            {"DBUS_SESSION_BUS_ADDRESS": "unix:path=/tmp/dbus", "DISPLAY": ":0"},
+            clear=True,
+        ):
+            self.assertTrue(helpers._desktop_notifications_available())
+
+    async def test_notify_done_skips_desktop_notification_without_session(self):
+        response = mock.Mock()
+        response.raise_for_status.return_value = None
+        post = mock.AsyncMock(return_value=response)
+        client = mock.AsyncMock()
+        client.__aenter__.return_value = client
+        client.post = post
+
+        with (
+            mock.patch.object(helpers.httpx, "AsyncClient", return_value=client),
+            mock.patch.object(helpers, "_desktop_notifications_available", return_value=False),
+            mock.patch.object(helpers.log, "warning") as warning_log,
+        ):
+            await helpers.notify_done("Готово", "Видео обработано")
+
+        post.assert_awaited_once_with(
+            helpers.NTFY_URL,
+            json=helpers._ntfy_payload("Готово", "Видео обработано"),
+        )
+        warning_log.assert_not_called()
 
 
 if __name__ == "__main__":
