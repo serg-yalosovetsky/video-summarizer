@@ -17,6 +17,7 @@ from prompts import (
     SPEAKER_FRAME_PROMPT_TEMPLATE,
     SPEAKER_FRAME_SYSTEM,
 )
+from tracing import start_observation
 
 OLLAMA_URL = settings.ollama_url
 FRAME_MODEL = settings.frame_model
@@ -147,18 +148,57 @@ def analyze_frame(image_path: str) -> str:
              OLLAMA_URL, FRAME_MODEL, Path(image_path).name, img_size // 1024)
     with open(image_path, "rb") as file_handle:
         b64 = base64.b64encode(file_handle.read()).decode()
-    raw = _ollama_vision_post(
-        FRAME_ANALYSIS_PROMPT,
-        FRAME_ANALYSIS_SYSTEM,
-        b64,
-        FrameAnalysisResult.model_json_schema(),
-    )
-    try:
-        return FrameAnalysisResult.model_validate_json(raw).to_context_str()
-    except Exception:
-        return raw
+    with start_observation(
+        "ollama.frame-analysis",
+        as_type="generation",
+        model=FRAME_MODEL,
+        input={
+            "prompt": FRAME_ANALYSIS_PROMPT,
+            "system": FRAME_ANALYSIS_SYSTEM,
+            "schema": FrameAnalysisResult.model_json_schema(),
+        },
+        metadata={
+            "provider": "ollama",
+            "image_name": Path(image_path).name,
+            "image_size_bytes": img_size,
+        },
+    ) as generation:
+        raw = _ollama_vision_post(
+            FRAME_ANALYSIS_PROMPT,
+            FRAME_ANALYSIS_SYSTEM,
+            b64,
+            FrameAnalysisResult.model_json_schema(),
+        )
+        try:
+            result = FrameAnalysisResult.model_validate_json(raw).to_context_str()
+        except Exception:
+            result = raw
+        if generation is not None:
+            generation.update(output=result)
+        return result
 
 
+
+
+_NO_NAME_MARKERS = (
+    "no visible",
+    "no name",
+    "unknown",
+    "not visible",
+    "no label",
+    "no tag",
+    "cannot see",
+    "no person",
+    "not identified",
+)
+_MAX_FRAMES_PER_SPEAKER = 3
+
+
+def _is_no_name(name: str | None) -> bool:
+    if not name:
+        return True
+    lower = name.lower()
+    return any(marker in lower for marker in _NO_NAME_MARKERS)
 
 
 def analyze_speaker_frames(
@@ -170,7 +210,7 @@ def analyze_speaker_frames(
     start_index: int = 0,
     total_hint: int | None = None,
 ) -> str:
-    """Extract and analyze one frame per unique speaker; falls back to next-longest segment if confidence is low."""
+    """Extract and analyze frames per speaker; prefers frames where a name is visible."""
     from collections import defaultdict
     speaker_segs: dict[str, list[tuple[float, float]]] = defaultdict(list)
     for start, end, spk in diarization_segments:
@@ -185,9 +225,12 @@ def analyze_speaker_frames(
             async_q.put_nowait,
             {"current": start_index + idx, "total": total},
         )
-        result: SpeakerFrameResult | None = None
-        used_ts = None
-        for start, end in speaker_segs[spk]:
+        best_with_name: SpeakerFrameResult | None = None
+        best_ts_with_name: int | None = None
+        best_without_name: SpeakerFrameResult | None = None
+        best_ts_without_name: int | None = None
+
+        for start, end in speaker_segs[spk][:_MAX_FRAMES_PER_SPEAKER]:
             ts = int((start + end) / 2)
             out_path = str(Path(tmp_dir) / f"frame_spk_{spk}_{ts}s.jpg")
             if not extract_single_frame(input_path, out_path, ts):
@@ -196,27 +239,62 @@ def analyze_speaker_frames(
             with open(out_path, "rb") as fh:
                 b64 = base64.b64encode(fh.read()).decode()
             try:
-                raw = _ollama_vision_post(
-                    prompt,
-                    SPEAKER_FRAME_SYSTEM,
-                    b64,
-                    SpeakerFrameResult.model_json_schema(),
-                )
-                candidate = SpeakerFrameResult.model_validate_json(raw)
+                with start_observation(
+                    "ollama.speaker-frame-analysis",
+                    as_type="generation",
+                    model=FRAME_MODEL,
+                    input={
+                        "prompt": prompt,
+                        "system": SPEAKER_FRAME_SYSTEM,
+                        "schema": SpeakerFrameResult.model_json_schema(),
+                    },
+                    metadata={
+                        "provider": "ollama",
+                        "speaker_id": spk,
+                        "timestamp_sec": ts,
+                        "image_name": Path(out_path).name,
+                    },
+                ) as generation:
+                    raw = _ollama_vision_post(
+                        prompt,
+                        SPEAKER_FRAME_SYSTEM,
+                        b64,
+                        SpeakerFrameResult.model_json_schema(),
+                    )
+                    candidate = SpeakerFrameResult.model_validate_json(raw)
+                    if generation is not None:
+                        generation.update(
+                            output={
+                                "person_visible": candidate.person_visible,
+                                "name": candidate.name,
+                                "appearance": candidate.appearance,
+                                "position": candidate.position,
+                            }
+                        )
             except Exception as exc:
                 log.warning("  [frames] speaker frame error for %s @ %ds: %s", spk, ts, exc)
                 continue
+
             if candidate.person_visible:
-                result = candidate
-                used_ts = ts
-                break
-            log.info("  [frames] low-confidence frame for %s @ %ds, trying next segment", spk, ts)
-            result = candidate
-            used_ts = ts
+                if not _is_no_name(candidate.name):
+                    best_with_name = candidate
+                    best_ts_with_name = ts
+                    log.info("  [frames] found name for %s @ %ds: %s", spk, ts, candidate.name)
+                    break
+                if best_without_name is None:
+                    best_without_name = candidate
+                    best_ts_without_name = ts
+                    log.info("  [frames] person visible but no name for %s @ %ds, trying next", spk, ts)
+            else:
+                log.info("  [frames] no person visible for %s @ %ds, trying next", spk, ts)
+
+        result = best_with_name or best_without_name
+        used_ts = best_ts_with_name or best_ts_without_name
 
         if result and used_ts is not None:
             results.append(result.to_context_str(spk, used_ts))
-            log.info("  [frames] speaker frame analyzed: %s @ %ds", spk, used_ts)
+            name_status = result.name if not _is_no_name(result.name) else "no name"
+            log.info("  [frames] speaker %s @ %ds → %s", spk, used_ts, name_status)
         else:
             log.warning("  [frames] no usable frame found for %s", spk)
 

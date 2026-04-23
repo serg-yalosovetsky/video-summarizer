@@ -276,6 +276,11 @@
       background: rgba(74, 222, 128, 0.12);
     }
 
+    .badge.warn {
+      color: #fff;
+      background: #f59e0b;
+    }
+
     .spoiler-body {
       padding: 0 1.1rem 1.1rem;
       border-top: 1px solid var(--border);
@@ -523,6 +528,17 @@
       </div>
     </details>
 
+    <!-- Spoiler 2b: Visual context from frames -->
+    <details id="spoiler-frames" style="display:none">
+      <summary>
+        Визуальный контекст кадров (идентификация спикеров)
+        <span class="badge" id="badge-frames">...</span>
+      </summary>
+      <div class="spoiler-body">
+        <pre id="content-frames"></pre>
+      </div>
+    </details>
+
     <!-- Spoiler 3: Cleaned transcript -->
     <details id="spoiler-cleaned" style="display:none">
       <summary>
@@ -662,7 +678,7 @@
       timerReset();
       errorBanner.style.display = 'none';
       errorBanner.textContent = '';
-      ['ffmpeg', 'transcript', 'cleaned', 'summary'].forEach(id => {
+      ['ffmpeg', 'transcript', 'frames', 'cleaned', 'summary'].forEach(id => {
         const el = document.getElementById('spoiler-' + id);
         el.style.display = 'none';
         el.removeAttribute('open');
@@ -671,6 +687,7 @@
       });
       document.getElementById('content-ffmpeg').textContent = '';
       document.getElementById('content-transcript').textContent = '';
+      document.getElementById('content-frames').textContent = '';
       document.getElementById('content-cleaned').textContent = '';
       document.getElementById('content-summary').innerHTML = '';
       document.getElementById('cleaned-download-wrap').style.display = 'none';
@@ -804,6 +821,29 @@
           whisperWrap.style.display = 'none';
           showSpoiler('transcript', payload.text);
           break;
+
+        case 'frames_done': {
+          const ctx = (payload.context || '').trim();
+          const report = (payload.quality_report || '').trim();
+          const label = (payload.quality_label || '').trim();
+          if (ctx) {
+            const display = report ? report + '\n\n---\n\n' + ctx : ctx;
+            showSpoiler('frames', display);
+            // Override badge set by showSpoiler with quality-specific state
+            const badge = document.getElementById('badge-frames');
+            if (label) {
+              badge.textContent = label;
+              if (label === 'high') {
+                badge.className = 'badge done';
+              } else if (label === 'medium') {
+                badge.className = 'badge';
+              } else {
+                badge.className = 'badge warn';
+              }
+            }
+          }
+          break;
+        }
 
         case 'cleaned_done':
           showSpoiler('cleaned', payload.text);

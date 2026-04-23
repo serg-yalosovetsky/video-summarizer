@@ -97,6 +97,10 @@ class Settings:
     ollama_summary_max_tokens: int
     ollama_clean_max_tokens: int
     max_visual_context_chars: int
+    langfuse_public_key: str | None
+    langfuse_secret_key: str | None
+    langfuse_base_url: str
+    langfuse_enabled: bool
 
 
 def build_settings() -> Settings:
@@ -114,6 +118,12 @@ def build_settings() -> Settings:
     ollama_clean_model = _env_str("OLLAMA_CLEAN_MODEL", ollama_model)
     frame_model = _env_str("FRAME_MODEL", ollama_model)
     ntfy_topic = _env_str("NTFY_TOPIC", "syalosovetskyi_subscribe_topic")
+    langfuse_public_key = os.environ.get("LANGFUSE_PUBLIC_KEY") or None
+    langfuse_secret_key = os.environ.get("LANGFUSE_SECRET_KEY") or None
+    langfuse_base_url = _env_str(
+        "LANGFUSE_BASE_URL",
+        _env_str("LANGFUSE_HOST", "https://cloud.langfuse.com"),
+    )
     user_primary_name = _env_str("USER_PRIMARY_NAME", "Сергей").strip() or "Сергей"
     user_aliases = list(_env_list("USER_ALIASES", ["Сергей", "Сергій", "Serhii"]))
     user_profile_overridden = (
@@ -160,6 +170,10 @@ def build_settings() -> Settings:
         ollama_summary_max_tokens=_env_int("OLLAMA_SUMMARY_MAX_TOKENS", 1024),
         ollama_clean_max_tokens=_env_int("OLLAMA_CLEAN_MAX_TOKENS", 4096),
         max_visual_context_chars=_env_int("MAX_VISUAL_CONTEXT_CHARS", 2000),
+        langfuse_public_key=langfuse_public_key,
+        langfuse_secret_key=langfuse_secret_key,
+        langfuse_base_url=langfuse_base_url,
+        langfuse_enabled=bool(langfuse_public_key and langfuse_secret_key),
     )
 
 

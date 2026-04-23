@@ -49,9 +49,22 @@ MISSING_CONTENT_RESPONSE_PATTERNS = (
     "i'm ready to create the comprehensive",
     "once the text is available",
 )
-TIMESTAMP_RE = re.compile(r"\[\d{2}:\d{2}:\d{2}\]")
+LIKELY_COMPLETE_ENDINGS = (
+    ".",
+    "!",
+    "?",
+    "…",
+    ":",
+    ";",
+    ")",
+    "]",
+    '"',
+)
+TIMESTAMP_RE = re.compile(r"\[\d{2}:\s*\d{2}:\s*\d{2}\]")
 SUMMARY_DIRECT_MAX_CHARS = 12000
 SUMMARY_CHUNK_TARGET_CHARS = 6000
+SUMMARY_RETRY_MIN_TOKENS = 2048
+TLDR_RETRY_MIN_TOKENS = 1536
 
 
 def trim_visual_context(visual_context: str) -> str:
@@ -67,12 +80,190 @@ def build_context_block(visual_context: str) -> str:
     return f"Visual context from video frames:\n{trim_visual_context(visual_context)}\n\n"
 
 
+_SPEAKER_LINE_RE = re.compile(r"^\[(\w+)\s*@\s*\d+s\]\s*(.*)", re.IGNORECASE)
+_NAME_RE = re.compile(r"(?i)\bname:\s*([^,\n]+)")
+_NO_CONTEXT_NAME_MARKERS = frozenset([
+    "no visible", "no name", "unknown", "not visible",
+    "no label", "no tag", "cannot see", "not identified",
+])
+_GENDER_TOKENS = frozenset(["male", "female", "man", "woman", "boy", "girl"])
+_APPEARANCE_KEYWORDS = re.compile(
+    r"\b(dark|light|blue|grey|gray|black|white|brown|red|green|blazer|shirt|"
+    r"jacket|glasses|hoodie|suit|tie|beard|hair|bald|coat|sweater)\b",
+    re.IGNORECASE,
+)
+
+
+def _normalise_name(name: str) -> str:
+    return " ".join(name.strip().upper().split())
+
+
+def _is_no_context_name(name: str | None) -> bool:
+    if not name:
+        return True
+    lower = name.strip().lower()
+    return any(marker in lower for marker in _NO_CONTEXT_NAME_MARKERS)
+
+
+def _appearance_features(appearance: str) -> frozenset[str]:
+    lower = appearance.lower()
+    gender = next((t for t in _GENDER_TOKENS if t in lower), "")
+    keywords = frozenset(m.group(0).lower() for m in _APPEARANCE_KEYWORDS.finditer(appearance))
+    return frozenset({gender} | keywords) - {""}
+
+
+def _appearances_similar(a: str, b: str) -> bool:
+    fa = _appearance_features(a)
+    fb = _appearance_features(b)
+    if not fa or not fb:
+        return False
+    shared = fa & fb
+    # Must share gender and at least one other feature
+    has_gender = bool(shared & _GENDER_TOKENS)
+    has_other = bool(shared - _GENDER_TOKENS)
+    return has_gender and has_other
+
+
+def evaluate_speaker_context(visual_context: str) -> dict:
+    """Parse visual_context and assess speaker identification quality.
+
+    Returns a dict with keys:
+      speaker_names, speaker_appearances, reliable,
+      suspicious_same_appearance, suspicious_diff_appearance,
+      unidentified, quality_score, quality_label
+    """
+    speaker_names: dict[str, str | None] = {}
+    speaker_appearances: dict[str, str] = {}
+
+    for line in visual_context.strip().splitlines():
+        m = _SPEAKER_LINE_RE.match(line.strip())
+        if not m:
+            continue
+        speaker_id = m.group(1)
+        rest = m.group(2)
+
+        name_m = _NAME_RE.search(rest)
+        raw_name = name_m.group(1).strip() if name_m else None
+        name = None if _is_no_context_name(raw_name) else (raw_name or None)
+
+        appearance = rest
+        if name_m:
+            appearance = rest[name_m.end():].lstrip(", ")
+
+        speaker_names[speaker_id] = name
+        speaker_appearances[speaker_id] = appearance
+
+    # Group speakers by normalised name
+    name_to_speakers: dict[str, list[str]] = {}
+    for spk, name in speaker_names.items():
+        if name:
+            key = _normalise_name(name)
+            name_to_speakers.setdefault(key, []).append(spk)
+
+    suspicious_same: list[tuple[str, list[str]]] = []
+    suspicious_diff: list[tuple[str, list[str]]] = []
+
+    for norm_name, speakers in name_to_speakers.items():
+        if len(speakers) < 2:
+            continue
+        # Compare appearances pairwise
+        appearances = [speaker_appearances.get(s, "") for s in speakers]
+        all_similar = all(
+            _appearances_similar(appearances[i], appearances[j])
+            for i in range(len(appearances))
+            for j in range(i + 1, len(appearances))
+        )
+        display_name = speaker_names[speakers[0]] or norm_name
+        if all_similar:
+            suspicious_same.append((display_name, speakers))
+        else:
+            suspicious_diff.append((display_name, speakers))
+
+    skip_speakers: set[str] = {s for _, group in suspicious_same for s in group}
+    identified = [s for s, n in speaker_names.items() if n and s not in skip_speakers]
+    unidentified = [s for s, n in speaker_names.items() if not n]
+
+    total = len(speaker_names)
+    quality_score = len(identified) / total if total else 0.0
+    if quality_score >= 0.7:
+        quality_label = "high"
+    elif quality_score >= 0.4:
+        quality_label = "medium"
+    elif quality_score > 0:
+        quality_label = "low"
+    else:
+        quality_label = "none"
+
+    return {
+        "speaker_names": speaker_names,
+        "speaker_appearances": speaker_appearances,
+        "reliable": identified,
+        "suspicious_same_appearance": suspicious_same,
+        "suspicious_diff_appearance": suspicious_diff,
+        "unidentified": unidentified,
+        "quality_score": quality_score,
+        "quality_label": quality_label,
+    }
+
+
+def build_quality_report(eval_result: dict) -> str:
+    reliable = eval_result["reliable"]
+    suspicious_same = eval_result["suspicious_same_appearance"]
+    suspicious_diff = eval_result["suspicious_diff_appearance"]
+    unidentified = eval_result["unidentified"]
+    total = len(eval_result["speaker_names"])
+    label = eval_result["quality_label"].upper()
+    lines = [f"Speaker identification quality: {label} ({len(reliable)}/{total} reliable)"]
+
+    if reliable:
+        names_str = ", ".join(
+            f"{s} → {eval_result['speaker_names'][s]}"
+            for s in sorted(reliable)
+        )
+        lines.append(f"✓ Reliable: {names_str}")
+
+    if unidentified:
+        lines.append(f"✗ Unidentified (no name in any frame): {', '.join(sorted(unidentified))}")
+
+    for name, speakers in suspicious_same:
+        spk_str = ", ".join(sorted(speakers))
+        lines.append(
+            f"⚠ Duplicate name + similar appearance → skipped: "
+            f"{spk_str} both show \"{name}\" (same person assigned to multiple speakers)"
+        )
+
+    for name, speakers in suspicious_diff:
+        spk_str = ", ".join(sorted(speakers))
+        lines.append(
+            f"? Same name, different appearance (kept): "
+            f"{spk_str} both show \"{name}\" — may be two different people"
+        )
+
+    return "\n".join(lines)
+
+
+def filter_reliable_context(visual_context: str, eval_result: dict) -> str:
+    """Replace name field for suspicious-same-appearance speakers to prevent wrong substitution."""
+    skip_speakers = {s for _, group in eval_result["suspicious_same_appearance"] for s in group}
+    if not skip_speakers:
+        return visual_context
+
+    filtered: list[str] = []
+    for line in visual_context.splitlines():
+        m = _SPEAKER_LINE_RE.match(line.strip())
+        if m and m.group(1) in skip_speakers:
+            line = _NAME_RE.sub("name: [ambiguous — skipped]", line, count=1)
+        filtered.append(line)
+    return "\n".join(filtered)
+
+
 def local_preclean_content(text: str) -> str:
     normalized = text.replace("\r\n", "\n").replace("\r", "\n")
     normalized = normalized.replace("\t", " ")
     normalized = re.sub(r"[ ]{2,}", " ", normalized)
-    normalized = re.sub(r" *([,.;:!?])", r"\1", normalized)
-    normalized = re.sub(r"([,.;:!?])([^\s\n])", r"\1 \2", normalized)
+    # Exclude ':' to preserve [HH:MM:SS] timestamp format
+    normalized = re.sub(r" *([,.;!?])", r"\1", normalized)
+    normalized = re.sub(r"([,.;!?])([^\s\n])", r"\1 \2", normalized)
     normalized = re.sub(r"\n{3,}", "\n\n", normalized)
     return normalized.strip()
 
@@ -89,6 +280,20 @@ def looks_like_missing_content_response(text: str) -> bool:
     if not normalized:
         return True
     return any(pattern in normalized for pattern in MISSING_CONTENT_RESPONSE_PATTERNS)
+
+
+def looks_truncated_response(text: str) -> bool:
+    normalized = local_preclean_content(text)
+    if len(normalized) < 80:
+        return False
+    if normalized.endswith(LIKELY_COMPLETE_ENDINGS):
+        return False
+    if normalized.endswith("**"):
+        return False
+    last_line = normalized.splitlines()[-1].strip()
+    if re.match(r"^[-*]\s+[^\s].{0,80}$", last_line):
+        return False
+    return bool(re.search(r"[A-Za-zА-Яа-яІіЇїЄєҐґ0-9]$", normalized))
 
 
 def prefer_meaningful_content(primary: str, fallback: str) -> str:

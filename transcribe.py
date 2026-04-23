@@ -6,69 +6,42 @@ from __future__ import annotations
 
 import asyncio
 import argparse
-import json
-import os
 import shutil
-import subprocess
 import sys
 import tempfile
-from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 
 from config import settings
-from helpers import HF_TOKEN, log, tail_text
+from helpers import HF_TOKEN, log
+from tracing import start_observation
+from transcribe_diarization import (
+    DIARIZATION_GAP_THRESHOLD_SEC,
+    DIARIZATION_MAX_SEGMENT_SEC,
+    DIARIZATION_MIN_SEGMENT_SEC,
+    get_diarizer,
+    normalize_diarization_segments,
+    prepare_diarized_turns,
+    run_diarization,
+    split_long_speaker_segments,
+)
+from transcribe_ffmpeg import (
+    convert_to_wav,
+    extract_audio_chunk,
+    format_speaker_timestamp,
+    prepare_audio,
+)
+from transcribe_types import (
+    AudioChunk,
+    DiarizationSegment,
+    LegacySegment,
+    PreparedAudio,
+    WavConversionResult,
+)
 
 CANARY_MODEL = settings.canary_model
 CANARY_DEVICE = settings.canary_device
-PYANNOTE_DEVICE = settings.pyannote_device
 CANARY_SEGMENT_BATCH_SIZE = settings.canary_segment_batch_size
-DIARIZATION_GAP_THRESHOLD_SEC = 1.0
-DIARIZATION_MIN_SEGMENT_SEC = 0.5
-DIARIZATION_MAX_SEGMENT_SEC = 20.0
-LegacySegment = tuple[float, float, str]
-
-
-@dataclass(frozen=True)
-class DiarizationSegment:
-    """Speaker-attributed time span in seconds."""
-
-    start: float
-    end: float
-    speaker: str
-
-
-@dataclass(frozen=True)
-class AudioChunk:
-    """Extracted WAV chunk for a diarized speaker segment."""
-
-    segment: DiarizationSegment
-    path: str
-
-
-@dataclass(frozen=True)
-class WavConversionResult:
-    """Metadata returned after converting media into a mono 16 kHz WAV file."""
-
-    file_info: str
-    format_name: str
-    duration_display: str
-    duration_sec: float
-    codec: str
-    has_video: bool
-    output_path: str
-
-
-@dataclass(frozen=True)
-class PreparedAudio:
-    """Temporary WAV file prepared for transcription."""
-
-    path: str
-    temp_dir: str
-
-    def cleanup(self) -> None:
-        """Remove the temporary directory that owns this prepared file."""
-        shutil.rmtree(self.temp_dir, ignore_errors=True)
 
 
 def parse_args() -> argparse.Namespace:
@@ -114,32 +87,6 @@ def choose_device() -> str:
     )
 
 
-def choose_pyannote_device():
-    import torch
-
-    if PYANNOTE_DEVICE not in {"cuda", "cpu", "auto"}:
-        raise RuntimeError(
-            f"Unsupported PYANNOTE_DEVICE={PYANNOTE_DEVICE!r}. Use one of: cuda, cpu, auto."
-        )
-
-    if PYANNOTE_DEVICE == "cpu":
-        return torch.device("cpu")
-
-    if torch.cuda.is_available():
-        return torch.device("cuda")
-
-    if PYANNOTE_DEVICE == "auto":
-        log.warning("CUDA is unavailable for pyannote, falling back to CPU.")
-        return torch.device("cpu")
-
-    raise RuntimeError(
-        "CUDA is required for pyannote diarization but is unavailable. "
-        f"{cuda_diagnostics(torch)}. "
-        "Run install.bat/install.sh to install a CUDA-enabled PyTorch build and verify NVIDIA drivers, "
-        "or set PYANNOTE_DEVICE=auto/cpu if you intentionally want CPU mode."
-    )
-
-
 @lru_cache(maxsize=1)
 def get_canary_model():
     from nemo.collections.asr.models import ASRModel
@@ -175,98 +122,6 @@ def get_canary_model():
     return model
 
 
-def convert_to_wav(input_path: str, output_path: str) -> WavConversionResult:
-    """Convert media into mono 16 kHz WAV and return conversion metadata."""
-    probe_cmd = [
-        "ffprobe",
-        "-v",
-        "error",
-        "-print_format",
-        "json",
-        "-show_streams",
-        "-show_format",
-        input_path,
-    ]
-    probe_result = subprocess.run(
-        probe_cmd,
-        capture_output=True,
-        check=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-    )
-    probe_data = json.loads(probe_result.stdout)
-
-    fmt = probe_data.get("format", {})
-    format_name = fmt.get("format_long_name", fmt.get("format_name", "unknown"))
-    duration_sec = float(fmt.get("duration", 0))
-    duration_str = (
-        f"{int(duration_sec // 3600):02d}:{int((duration_sec % 3600) // 60):02d}:"
-        f"{int(duration_sec % 60):02d}"
-    )
-    file_size_mb = int(fmt.get("size", 0)) / (1024 * 1024)
-
-    codec = "unknown"
-    has_audio_stream = False
-    has_video_stream = False
-    for stream in probe_data.get("streams", []):
-        if stream.get("codec_type") == "audio" and not has_audio_stream:
-            has_audio_stream = True
-            codec = stream.get("codec_long_name", stream.get("codec_name", "unknown"))
-        elif stream.get("codec_type") == "video":
-            has_video_stream = True
-
-    if not has_audio_stream:
-        raise ValueError(
-            "В файле не найдена аудиодорожка. Загрузите видео или аудио с доступным звуком."
-        )
-
-    file_info = (
-        f"File: {Path(input_path).name}\n"
-        f"Format: {format_name}\n"
-        f"Duration: {duration_str}\n"
-        f"Audio codec: {codec}\n"
-        f"Size: {file_size_mb:.1f} MB\n"
-        f"Output: 16 kHz mono WAV"
-    )
-
-    ffmpeg_cmd = [
-        "ffmpeg",
-        "-hide_banner",
-        "-loglevel",
-        "error",
-        "-y",
-        "-i",
-        input_path,
-        "-vn",
-        "-ar",
-        "16000",
-        "-ac",
-        "1",
-        "-c:a",
-        "pcm_s16le",
-        output_path,
-    ]
-    subprocess.run(
-        ffmpeg_cmd,
-        capture_output=True,
-        check=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-    )
-
-    return WavConversionResult(
-        file_info=file_info,
-        format_name=format_name,
-        duration_display=duration_str,
-        duration_sec=duration_sec,
-        codec=codec,
-        has_video=has_video_stream,
-        output_path=output_path,
-    )
-
-
 def transcribe_with_canary(
     wav_path: str,
     async_q: asyncio.Queue,
@@ -275,67 +130,34 @@ def transcribe_with_canary(
     target_lang: str | None = None,
 ) -> str:
     """Run single-pass transcription for one WAV file and return plain text."""
-    model = get_canary_model()
-    target_lang = target_lang or source_lang
-    log.info("  [canary] starting inference (this may take several minutes)...")
-    loop.call_soon_threadsafe(async_q.put_nowait, 1)
-    try:
-        outputs = model.transcribe(  # type: ignore[operator]
-            audio=[wav_path],
-            source_lang=source_lang,
-            target_lang=target_lang,
-        )
-    except Exception:
-        log.exception("  [canary] inference failed")
-        raise
-    finally:
-        loop.call_soon_threadsafe(async_q.put_nowait, None)
-    if outputs:
-        return getattr(outputs[0], "text", str(outputs[0]))
-    return ""
-
-
-@lru_cache(maxsize=1)
-def get_diarizer():
-    from pyannote.audio import Pipeline
-
-    log.info("Loading pyannote diarization model...")
-    model_id = settings.pyannote_model
-    pipeline = Pipeline.from_pretrained(
-        model_id,
-        token=HF_TOKEN or True,
-    )
-    device = choose_pyannote_device()
-    if hasattr(pipeline, "to"):
-        pipeline.to(device)
-    log.info("  [pyannote] device: %s", device)
-    log.info("Diarizer ready.")
-    return pipeline
-
-
-def run_diarization(wav_path: str) -> list[LegacySegment]:
-    """Run speaker diarization and return sorted legacy segments."""
-    pipeline = get_diarizer()
-    raw = pipeline(wav_path)
-    # pyannote >= 3.2 returns DiarizeOutput; older/legacy returns Annotation directly
-    annotation = getattr(raw, 'speaker_diarization', None) or getattr(raw, 'diarization', None) or raw
-    segments = [
-        (turn.start, turn.end, speaker)
-        for turn, _, speaker in annotation.itertracks(yield_label=True)
-    ]
-    return sorted(segments, key=lambda x: x[0])
-
-
-def _segment_from_tuple(segment: LegacySegment) -> DiarizationSegment:
-    """Convert a legacy diarization tuple into a named segment."""
-    start, end, speaker = segment
-    return DiarizationSegment(start=float(start), end=float(end), speaker=str(speaker))
-
-
-def _segment_to_tuple(segment: DiarizationSegment) -> LegacySegment:
-    """Convert a named segment back to the legacy tuple shape used by callers."""
-    return (segment.start, segment.end, segment.speaker)
-
+    with start_observation(
+        "canary.transcribe-single",
+        input={
+            "audio_file": Path(wav_path).name,
+            "source_lang": source_lang,
+            "target_lang": target_lang or source_lang,
+        },
+        metadata={"model": CANARY_MODEL},
+    ) as span:
+        model = get_canary_model()
+        target_lang = target_lang or source_lang
+        log.info("  [canary] starting inference (this may take several minutes)...")
+        loop.call_soon_threadsafe(async_q.put_nowait, 1)
+        try:
+            outputs = model.transcribe(  # type: ignore[operator]
+                audio=[wav_path],
+                source_lang=source_lang,
+                target_lang=target_lang,
+            )
+        except Exception:
+            log.exception("  [canary] inference failed")
+            raise
+        finally:
+            loop.call_soon_threadsafe(async_q.put_nowait, None)
+        result = getattr(outputs[0], "text", str(outputs[0])) if outputs else ""
+        if span is not None:
+            span.update(output={"text_length": len(result)})
+        return result
 
 def _normalize_output_texts(outputs, expected_count: int) -> list[str]:
     """Return exactly `expected_count` stripped transcription texts."""
@@ -399,151 +221,6 @@ def _report_chunk_progress(
         chunk.segment.speaker,
         chunk.segment.start,
     )
-
-
-def normalize_diarization_segments(
-    segments: list[LegacySegment],
-    gap_threshold: float = DIARIZATION_GAP_THRESHOLD_SEC,
-    min_duration: float = DIARIZATION_MIN_SEGMENT_SEC,
-) -> list[LegacySegment]:
-    """
-    Normalize diarization spans into monotonic speaker segments.
-
-    Args:
-        segments: Raw `(start, end, speaker)` spans.
-        gap_threshold: Max silent gap allowed when merging same-speaker spans.
-        min_duration: Minimum duration that survives cleanup.
-
-    Returns:
-        Cleaned and merged legacy segments.
-    """
-    if not segments:
-        return []
-
-    cleaned: list[DiarizationSegment] = []
-    for raw_segment in sorted((_segment_from_tuple(item) for item in segments), key=lambda item: item.start):
-        start = max(0.0, raw_segment.start)
-        end = max(start, raw_segment.end)
-        if cleaned and start < cleaned[-1].end:
-            # When pyannote returns slight overlaps, prefer keeping chronology stable.
-            start = cleaned[-1].end
-        if (end - start) >= min_duration:
-            cleaned.append(DiarizationSegment(start=start, end=end, speaker=raw_segment.speaker))
-
-    if not cleaned:
-        return []
-
-    merged = [cleaned[0]]
-    for segment in cleaned[1:]:
-        prev = merged[-1]
-        if segment.speaker == prev.speaker and (segment.start - prev.end) <= gap_threshold:
-            merged[-1] = DiarizationSegment(
-                start=prev.start,
-                end=segment.end,
-                speaker=prev.speaker,
-            )
-        else:
-            merged.append(segment)
-    return [_segment_to_tuple(segment) for segment in merged if (segment.end - segment.start) >= min_duration]
-
-
-def split_long_speaker_segments(
-    segments: list[LegacySegment],
-    max_duration: float = DIARIZATION_MAX_SEGMENT_SEC,
-    min_duration: float = DIARIZATION_MIN_SEGMENT_SEC,
-) -> list[LegacySegment]:
-    """
-    Split long same-speaker spans into shorter ASR-friendly pieces.
-
-    Args:
-        segments: Cleaned diarization spans.
-        max_duration: Maximum preferred chunk duration in seconds.
-        min_duration: Minimum chunk duration to keep.
-
-    Returns:
-        Speaker segments capped to the requested maximum duration.
-    """
-    result: list[DiarizationSegment] = []
-    for segment in map(_segment_from_tuple, segments):
-        duration = segment.end - segment.start
-        if duration <= max_duration:
-            result.append(segment)
-            continue
-
-        parts = max(2, int(duration // max_duration) + (1 if duration % max_duration else 0))
-        chunk_duration = duration / parts
-        cursor = segment.start
-        while cursor < segment.end:
-            chunk_end = min(segment.end, cursor + chunk_duration)
-            if (chunk_end - cursor) >= min_duration:
-                result.append(
-                    DiarizationSegment(
-                        start=cursor,
-                        end=chunk_end,
-                        speaker=segment.speaker,
-                    )
-                )
-            cursor = chunk_end
-    return [_segment_to_tuple(segment) for segment in result]
-
-
-def prepare_diarized_turns(
-    segments: list[LegacySegment],
-    *,
-    gap_threshold: float = DIARIZATION_GAP_THRESHOLD_SEC,
-    min_duration: float = DIARIZATION_MIN_SEGMENT_SEC,
-    max_duration: float = DIARIZATION_MAX_SEGMENT_SEC,
-) -> list[LegacySegment]:
-    """
-    Convert raw diarization output into stable speaker turns for transcription.
-
-    Args:
-        segments: Raw diarization spans.
-        gap_threshold: Max gap for same-speaker merge.
-        min_duration: Minimum segment duration to keep.
-        max_duration: Maximum duration of a returned segment.
-
-    Returns:
-        Speaker turns ready for chunk extraction and ASR.
-    """
-    normalized = normalize_diarization_segments(
-        segments,
-        gap_threshold=gap_threshold,
-        min_duration=min_duration,
-    )
-    return split_long_speaker_segments(
-        normalized,
-        max_duration=max_duration,
-        min_duration=min_duration,
-    )
-
-
-def format_speaker_timestamp(start: float) -> str:
-    whole = int(start)
-    h = whole // 3600
-    m = (whole % 3600) // 60
-    s = whole % 60
-    return f"[{h:02d}:{m:02d}:{s:02d}]"
-
-
-def extract_audio_chunk(wav_path: str, start: float, end: float, out_path: str) -> bool:
-    """
-    Extract one mono 16 kHz WAV chunk for a time range.
-
-    Returns:
-        `True` when the chunk file was created successfully, otherwise `False`.
-    """
-    cmd = [
-        "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
-        "-ss", str(start), "-to", str(end),
-        "-i", wav_path,
-        "-ar", "16000", "-ac", "1", "-c:a", "pcm_s16le",
-        out_path,
-    ]
-    result = subprocess.run(cmd, capture_output=True)
-    return result.returncode == 0 and os.path.exists(out_path)
-
-
 def prepare_audio_chunks(
     wav_path: str,
     segments: list[LegacySegment],
@@ -561,11 +238,12 @@ def prepare_audio_chunks(
         Successfully extracted chunks in input order.
     """
     prepared_chunks: list[AudioChunk] = []
-    for i, segment in enumerate(map(_segment_from_tuple, segments), 1):
+    for i, (start, end, speaker) in enumerate(segments, 1):
         chunk_path = str(Path(tmp_dir) / f"chunk_{i:04d}.wav")
-        if not extract_audio_chunk(wav_path, segment.start, segment.end, chunk_path):
+        if not extract_audio_chunk(wav_path, start, end, chunk_path):
             log.warning("  [canary] chunk %d: ffmpeg extraction failed", i)
             continue
+        segment = DiarizationSegment(start=float(start), end=float(end), speaker=str(speaker))
         prepared_chunks.append(AudioChunk(segment=segment, path=chunk_path))
     return prepared_chunks
 
@@ -634,42 +312,6 @@ def transcribe_by_segments(
             shutil.rmtree(_tmp, ignore_errors=True)
     loop.call_soon_threadsafe(async_q.put_nowait, None)
     return "\n".join(transcript_lines)
-
-
-def prepare_audio(audio_path: str, target_sr: int = 16000) -> PreparedAudio:
-    """
-    Convert an input media file into a temporary mono WAV for transcription.
-
-    Args:
-        audio_path: Path to source media.
-        target_sr: Target sample rate in Hz.
-
-    Returns:
-        Prepared audio metadata with the temp directory ownership.
-
-    Raises:
-        RuntimeError: If ffmpeg fails to create the WAV file.
-    """
-    source = Path(audio_path).expanduser().resolve()
-    tmpdir = Path(tempfile.mkdtemp(prefix="canary_"))
-    out_path = tmpdir / f"{source.stem}_mono_{target_sr}.wav"
-    cmd = [
-        "ffmpeg",
-        "-y",
-        "-i",
-        str(source),
-        "-ar",
-        str(target_sr),
-        "-ac",
-        "1",
-        "-c:a",
-        "pcm_s16le",
-        str(out_path),
-    ]
-    result = subprocess.run(cmd, capture_output=True)
-    if result.returncode != 0:
-        raise RuntimeError(tail_text(result.stderr.decode(errors="replace")))
-    return PreparedAudio(path=str(out_path), temp_dir=str(tmpdir))
 
 
 def main() -> int:

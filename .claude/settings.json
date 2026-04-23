@@ -7,7 +7,11 @@
       "Bash(.venv/bin/python -c ' *)",
       "Bash(python -c \"from summary import generate_summary, generate_short_summary, generate_personal_todo; from prompts import CLEAN_PROMPT_TEMPLATE, SUMMARY_PROMPT_TEMPLATE; print\\('imports OK'\\); t = 'test transcript'; print\\(SUMMARY_PROMPT_TEMPLATE.format\\(transcript=t, user_name='Сергей', user_aliases='Serhii'\\)[-100:]\\)\")",
       "Bash(python -m py_compile summary.py prompts.py)",
-      "Bash(python -m py_compile main.py)"
+      "Bash(python -m py_compile main.py)",
+      "Bash(python -m py_compile summary.py)",
+      "Bash(python -m py_compile prompts.py summary.py)",
+      "Bash(python -c ' *)",
+      "Bash(python -m py_compile summary.py frames_analyze.py)"
     ]
   }
 }

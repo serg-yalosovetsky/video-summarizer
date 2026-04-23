@@ -223,6 +223,32 @@ class ProcessGeneratorTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(tldr_event["payload"]["is_meeting"])
         self.assertEqual(tldr_event["payload"]["text"], "todo for sergey")
 
+    async def test_process_generator_retries_truncated_tldr(self):
+        with (
+            mock.patch.object(main, "clean_content", return_value="discussion transcript"),
+            mock.patch.object(main, "classify_is_meeting", return_value=False),
+            mock.patch.object(main, "generate_summary", return_value="Full summary."),
+            mock.patch.object(main, "classify_text_language", return_value="ru"),
+            mock.patch.object(
+                main,
+                "generate_short_summary",
+                side_effect=[
+                    "**Problem**: The discussion addresses two main technical issues and",
+                    "**Problem**: The discussion addresses two main technical issues and proposes next steps.",
+                ],
+            ),
+        ):
+            chunks = []
+            async for item in main.process_generator(None, "meeting chat", "ru"):
+                chunks.append(item)
+
+        events = decode_events(chunks)
+        tldr_event = next(event for event in events if event["event"] == "tldr_done")
+        self.assertEqual(
+            tldr_event["payload"]["text"],
+            "**Problem**: The discussion addresses two main technical issues and proposes next steps.",
+        )
+
     async def test_lifespan_checks_ollama_before_loading_canary(self):
         calls = []
 
@@ -367,6 +393,20 @@ class SummaryHelperTests(unittest.TestCase):
         self.assertTrue(
             summary.looks_like_missing_content_response(
                 "Please provide the content you would like me to summarize."
+            )
+        )
+
+    def test_looks_truncated_response_detects_cut_off_sentence(self):
+        self.assertTrue(
+            summary.looks_truncated_response(
+                "**Problem**: The discussion addresses two main technical issues and"
+            )
+        )
+
+    def test_looks_truncated_response_ignores_completed_sentence(self):
+        self.assertFalse(
+            summary.looks_truncated_response(
+                "**Problem**: The discussion addresses two main technical issues."
             )
         )
 

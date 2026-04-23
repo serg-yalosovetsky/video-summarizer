@@ -9,6 +9,7 @@ from functools import lru_cache
 import httpx
 
 from config import settings
+from tracing import start_observation
 
 logging.basicConfig(
     level=logging.INFO,
@@ -187,19 +188,35 @@ def call_ollama(
     model: str | None = None,
     options: dict | None = None,
 ) -> str:
-    response = httpx.post(
-        OLLAMA_URL,
-        json={
-            "model": model or OLLAMA_MODEL,
+    request_model = model or OLLAMA_MODEL
+    payload = {
+        "model": request_model,
+        "prompt": prompt,
+        "system": system,
+        "stream": False,
+        "options": options or {},
+    }
+    with start_observation(
+        "ollama.generate",
+        as_type="generation",
+        model=request_model,
+        input={
             "prompt": prompt,
             "system": system,
-            "stream": False,
-            "options": options or {},
+            "options": payload["options"],
         },
-        timeout=timeout or settings.ollama_timeout_seconds,
-    )
-    response.raise_for_status()
-    return response.json()["response"]
+        metadata={"provider": "ollama", "url": OLLAMA_URL},
+    ) as generation:
+        response = httpx.post(
+            OLLAMA_URL,
+            json=payload,
+            timeout=timeout or settings.ollama_timeout_seconds,
+        )
+        response.raise_for_status()
+        output = response.json()["response"]
+        if generation is not None:
+            generation.update(output=output)
+        return output
 
 
 @lru_cache(maxsize=1)
