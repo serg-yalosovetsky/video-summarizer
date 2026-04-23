@@ -201,6 +201,10 @@ def _is_no_name(name: str | None) -> bool:
     return any(marker in lower for marker in _NO_NAME_MARKERS)
 
 
+def _has_name(candidate: "SpeakerFrameResult") -> bool:
+    return not _is_no_name(candidate.caption_name) or not _is_no_name(candidate.active_panel_name)
+
+
 def analyze_speaker_frames(
     input_path: str,
     tmp_dir: str,
@@ -266,7 +270,8 @@ def analyze_speaker_frames(
                         generation.update(
                             output={
                                 "person_visible": candidate.person_visible,
-                                "name": candidate.name,
+                                "caption_name": candidate.caption_name,
+                                "active_panel_name": candidate.active_panel_name,
                                 "appearance": candidate.appearance,
                                 "position": candidate.position,
                             }
@@ -276,10 +281,11 @@ def analyze_speaker_frames(
                 continue
 
             if candidate.person_visible:
-                if not _is_no_name(candidate.name):
+                if _has_name(candidate):
                     best_with_name = candidate
                     best_ts_with_name = ts
-                    log.info("  [frames] found name for %s @ %ds: %s", spk, ts, candidate.name)
+                    name_found = candidate.caption_name or candidate.active_panel_name
+                    log.info("  [frames] found name for %s @ %ds: %s", spk, ts, name_found)
                     break
                 if best_without_name is None:
                     best_without_name = candidate
@@ -293,7 +299,7 @@ def analyze_speaker_frames(
 
         if result and used_ts is not None:
             results.append(result.to_context_str(spk, used_ts))
-            name_status = result.name if not _is_no_name(result.name) else "no name"
+            name_status = result.caption_name or result.active_panel_name or "no name"
             log.info("  [frames] speaker %s @ %ds → %s", spk, used_ts, name_status)
         else:
             log.warning("  [frames] no usable frame found for %s", spk)

@@ -143,17 +143,26 @@ MEETING_SUMMARY_PROMPT_TEMPLATE = (
 )
 
 SPEAKER_FRAME_SYSTEM = (
-    "You are identifying a meeting participant from a single video frame. "
+    "You are identifying who is currently speaking in a video conference recording frame. "
     "Be concise and factual."
 )
 
 SPEAKER_FRAME_PROMPT_TEMPLATE = (
-    "This frame was captured at the moment {speaker_id} is speaking (at {ts}s into the video).\n"
-    "Describe this person:\n"
-    "1) Any visible name tag, lower-third, or on-screen label — state the exact name if present\n"
-    "2) Their appearance (gender, clothing, hair) so they can be distinguished from others\n"
-    "3) Their position in the frame (left, center, right)\n"
-    "If you cannot see any person, say so briefly."
+    "This frame is from a video conference recording captured at {ts}s. "
+    "At this moment {speaker_id} is the active speaker.\n\n"
+    "Fill in each field as described below:\n\n"
+    "caption_name — Read the caption/subtitle text overlay at the bottom of the screen. "
+    "It appears as \"PERSON_NAME: spoken words\". Copy only the name before the colon. "
+    "Set to null if no caption overlay is visible.\n\n"
+    "active_panel_name — Find the participant panel with a glowing, highlighted, or bright-colored border "
+    "(or a glowing ring/halo around a circular avatar). Copy the name label shown on that panel. "
+    "Set to null if no highlighted panel is visible.\n\n"
+    "appearance — Gender, clothing, and hair color of the currently speaking person.\n\n"
+    "position — Exact grid position of the speaking person's panel. "
+    "Divide the frame into a 3×3 grid and pick the cell where the panel is located: "
+    "top-left, top-center, top-right, middle-left, middle-center, middle-right, "
+    "bottom-left, bottom-center, or bottom-right.\n\n"
+    "person_visible — true if any person is clearly visible, false otherwise."
 )
 
 LANGUAGE_CHECK_SYSTEM = (

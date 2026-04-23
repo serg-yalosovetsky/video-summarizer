@@ -94,6 +94,7 @@ class Settings:
     user_profile_overridden: bool
     ntfy_topic: str
     ntfy_url: str
+    ollama_num_ctx: int
     ollama_summary_max_tokens: int
     ollama_clean_max_tokens: int
     max_visual_context_chars: int
@@ -167,7 +168,8 @@ def build_settings() -> Settings:
         user_profile_overridden=user_profile_overridden,
         ntfy_topic=ntfy_topic,
         ntfy_url=_env_str("NTFY_URL", f"https://ntfy.sh/{ntfy_topic}"),
-        ollama_summary_max_tokens=_env_int("OLLAMA_SUMMARY_MAX_TOKENS", 1024),
+        ollama_num_ctx=_env_int("OLLAMA_NUM_CTX", 32768),
+        ollama_summary_max_tokens=_env_int("OLLAMA_SUMMARY_MAX_TOKENS", 4096),
         ollama_clean_max_tokens=_env_int("OLLAMA_CLEAN_MAX_TOKENS", 4096),
         max_visual_context_chars=_env_int("MAX_VISUAL_CONTEXT_CHARS", 2000),
         langfuse_public_key=langfuse_public_key,

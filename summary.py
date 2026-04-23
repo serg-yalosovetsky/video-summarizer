@@ -26,6 +26,7 @@ from prompts import (
 OLLAMA_FAST_OPTIONS = {
     "temperature": 0,
     "top_p": 0.9,
+    "num_ctx": settings.ollama_num_ctx,
 }
 OLLAMA_CLASSIFIER_OPTIONS = {
     **OLLAMA_FAST_OPTIONS,
@@ -61,7 +62,7 @@ LIKELY_COMPLETE_ENDINGS = (
     '"',
 )
 TIMESTAMP_RE = re.compile(r"\[\d{2}:\s*\d{2}:\s*\d{2}\]")
-SUMMARY_DIRECT_MAX_CHARS = 12000
+SUMMARY_DIRECT_MAX_CHARS = settings.ollama_num_ctx * 3
 SUMMARY_CHUNK_TARGET_CHARS = 6000
 SUMMARY_RETRY_MIN_TOKENS = 2048
 TLDR_RETRY_MIN_TOKENS = 1536
@@ -82,6 +83,7 @@ def build_context_block(visual_context: str) -> str:
 
 _SPEAKER_LINE_RE = re.compile(r"^\[(\w+)\s*@\s*\d+s\]\s*(.*)", re.IGNORECASE)
 _NAME_RE = re.compile(r"(?i)\bname:\s*([^,\n]+)")
+_NAME_SOURCE_RE = re.compile(r"(?i)\bname_source:\s*([^,\n]+)")
 _NO_CONTEXT_NAME_MARKERS = frozenset([
     "no visible", "no name", "unknown", "not visible",
     "no label", "no tag", "cannot see", "not identified",
@@ -128,12 +130,13 @@ def evaluate_speaker_context(visual_context: str) -> dict:
     """Parse visual_context and assess speaker identification quality.
 
     Returns a dict with keys:
-      speaker_names, speaker_appearances, reliable,
+      speaker_names, speaker_appearances, speaker_name_sources, reliable,
       suspicious_same_appearance, suspicious_diff_appearance,
       unidentified, quality_score, quality_label
     """
     speaker_names: dict[str, str | None] = {}
     speaker_appearances: dict[str, str] = {}
+    speaker_name_sources: dict[str, str] = {}
 
     for line in visual_context.strip().splitlines():
         m = _SPEAKER_LINE_RE.match(line.strip())
@@ -146,12 +149,20 @@ def evaluate_speaker_context(visual_context: str) -> dict:
         raw_name = name_m.group(1).strip() if name_m else None
         name = None if _is_no_context_name(raw_name) else (raw_name or None)
 
+        source_m = _NAME_SOURCE_RE.search(rest)
+        name_source = source_m.group(1).strip() if source_m else ""
+
+        # Strip name: and name_source: tokens from appearance
         appearance = rest
-        if name_m:
-            appearance = rest[name_m.end():].lstrip(", ")
+        for pat_m in sorted(
+            filter(None, [name_m, source_m]), key=lambda x: x.start(), reverse=True
+        ):
+            appearance = appearance[: pat_m.start()] + appearance[pat_m.end() :]
+        appearance = re.sub(r"^[,\s]+", "", appearance).strip()
 
         speaker_names[speaker_id] = name
         speaker_appearances[speaker_id] = appearance
+        speaker_name_sources[speaker_id] = name_source
 
     # Group speakers by normalised name
     name_to_speakers: dict[str, list[str]] = {}
@@ -166,7 +177,6 @@ def evaluate_speaker_context(visual_context: str) -> dict:
     for norm_name, speakers in name_to_speakers.items():
         if len(speakers) < 2:
             continue
-        # Compare appearances pairwise
         appearances = [speaker_appearances.get(s, "") for s in speakers]
         all_similar = all(
             _appearances_similar(appearances[i], appearances[j])
@@ -179,8 +189,9 @@ def evaluate_speaker_context(visual_context: str) -> dict:
         else:
             suspicious_diff.append((display_name, speakers))
 
-    skip_speakers: set[str] = {s for _, group in suspicious_same for s in group}
-    identified = [s for s, n in speaker_names.items() if n and s not in skip_speakers]
+    # Same name + similar appearance = same person across multiple diarization IDs.
+    # Accept all of them — do NOT skip.
+    identified = [s for s, n in speaker_names.items() if n]
     unidentified = [s for s, n in speaker_names.items() if not n]
 
     total = len(speaker_names)
@@ -197,6 +208,7 @@ def evaluate_speaker_context(visual_context: str) -> dict:
     return {
         "speaker_names": speaker_names,
         "speaker_appearances": speaker_appearances,
+        "speaker_name_sources": speaker_name_sources,
         "reliable": identified,
         "suspicious_same_appearance": suspicious_same,
         "suspicious_diff_appearance": suspicious_diff,
@@ -228,8 +240,8 @@ def build_quality_report(eval_result: dict) -> str:
     for name, speakers in suspicious_same:
         spk_str = ", ".join(sorted(speakers))
         lines.append(
-            f"⚠ Duplicate name + similar appearance → skipped: "
-            f"{spk_str} both show \"{name}\" (same person assigned to multiple speakers)"
+            f"ℹ Same person, multiple diarization IDs: "
+            f"{spk_str} all identified as \"{name}\""
         )
 
     for name, speakers in suspicious_diff:
@@ -243,18 +255,8 @@ def build_quality_report(eval_result: dict) -> str:
 
 
 def filter_reliable_context(visual_context: str, eval_result: dict) -> str:
-    """Replace name field for suspicious-same-appearance speakers to prevent wrong substitution."""
-    skip_speakers = {s for _, group in eval_result["suspicious_same_appearance"] for s in group}
-    if not skip_speakers:
-        return visual_context
-
-    filtered: list[str] = []
-    for line in visual_context.splitlines():
-        m = _SPEAKER_LINE_RE.match(line.strip())
-        if m and m.group(1) in skip_speakers:
-            line = _NAME_RE.sub("name: [ambiguous — skipped]", line, count=1)
-        filtered.append(line)
-    return "\n".join(filtered)
+    """Pass visual context through unchanged — same-name/same-appearance speakers are the same person."""
+    return visual_context
 
 
 _SPEAKER_TAG_IN_TRANSCRIPT_RE = re.compile(r"\[SPEAKER_(\w+)\]")

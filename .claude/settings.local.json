@@ -2,7 +2,12 @@
   "permissions": {
     "allow": [
       "Bash(cmd /c mkdir \"e:\\\\code\\\\video-summarizer\\\\static\")",
-      "Bash(python3 -c ' *)"
+      "Bash(python3 -c ' *)",
+      "Bash(systemctl --user show ollama)",
+      "Bash(systemctl show *)",
+      "Read(//etc/systemd/system/**)",
+      "Read(//home/syalosovetskyi/.config/systemd/**)",
+      "Read(//etc/systemd/**)"
     ]
   }
 }

@@ -5,14 +5,32 @@ from pydantic import BaseModel, Field
 
 class SpeakerFrameResult(BaseModel):
     person_visible: bool = Field(description="Whether a person is clearly visible in the frame")
-    name: str | None = Field(default=None, description="Full name from name tag, lower-third, or on-screen label; null if not visible")
+    caption_name: str | None = Field(
+        default=None,
+        description=(
+            "Speaker name extracted from the caption/subtitle overlay at the bottom of the screen "
+            "(text formatted as 'NAME: spoken words'). Copy only the part before the colon. "
+            "Null if no such caption is visible."
+        ),
+    )
+    active_panel_name: str | None = Field(
+        default=None,
+        description=(
+            "Name label on the participant panel that has a glowing, highlighted, or bright-colored border, "
+            "or a glowing ring/halo around a circular avatar. Null if no such panel is visible."
+        ),
+    )
     appearance: str = Field(default="", description="Brief appearance description: gender, clothing, hair colour")
-    position: str = Field(default="", description="Position in frame: left, center, or right")
+    position: str = Field(default="", description="Grid position of the speaker's panel in the frame. One of: top-left, top-center, top-right, middle-left, middle-center, middle-right, bottom-left, bottom-center, bottom-right")
 
     def to_context_str(self, speaker_id: str, ts: int) -> str:
+        name = self.caption_name or self.active_panel_name
+        source = "caption" if self.caption_name else ("active_border" if self.active_panel_name else "")
         parts = []
-        if self.name:
-            parts.append(f"name: {self.name}")
+        if name:
+            parts.append(f"name: {name}")
+        if source:
+            parts.append(f"name_source: {source}")
         if self.appearance:
             parts.append(self.appearance)
         if self.position:
