@@ -12,6 +12,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+from dataclasses import dataclass
 from functools import lru_cache
 from pathlib import Path
 
@@ -22,6 +23,52 @@ CANARY_MODEL = settings.canary_model
 CANARY_DEVICE = settings.canary_device
 PYANNOTE_DEVICE = settings.pyannote_device
 CANARY_SEGMENT_BATCH_SIZE = settings.canary_segment_batch_size
+DIARIZATION_GAP_THRESHOLD_SEC = 1.0
+DIARIZATION_MIN_SEGMENT_SEC = 0.5
+DIARIZATION_MAX_SEGMENT_SEC = 20.0
+LegacySegment = tuple[float, float, str]
+
+
+@dataclass(frozen=True)
+class DiarizationSegment:
+    """Speaker-attributed time span in seconds."""
+
+    start: float
+    end: float
+    speaker: str
+
+
+@dataclass(frozen=True)
+class AudioChunk:
+    """Extracted WAV chunk for a diarized speaker segment."""
+
+    segment: DiarizationSegment
+    path: str
+
+
+@dataclass(frozen=True)
+class WavConversionResult:
+    """Metadata returned after converting media into a mono 16 kHz WAV file."""
+
+    file_info: str
+    format_name: str
+    duration_display: str
+    duration_sec: float
+    codec: str
+    has_video: bool
+    output_path: str
+
+
+@dataclass(frozen=True)
+class PreparedAudio:
+    """Temporary WAV file prepared for transcription."""
+
+    path: str
+    temp_dir: str
+
+    def cleanup(self) -> None:
+        """Remove the temporary directory that owns this prepared file."""
+        shutil.rmtree(self.temp_dir, ignore_errors=True)
 
 
 def parse_args() -> argparse.Namespace:
@@ -128,8 +175,8 @@ def get_canary_model():
     return model
 
 
-def convert_to_wav(input_path: str, output_path: str) -> dict:
-    """Convert any audio/video to 16 kHz mono WAV. Returns metadata dict."""
+def convert_to_wav(input_path: str, output_path: str) -> WavConversionResult:
+    """Convert media into mono 16 kHz WAV and return conversion metadata."""
     probe_cmd = [
         "ffprobe",
         "-v",
@@ -209,14 +256,15 @@ def convert_to_wav(input_path: str, output_path: str) -> dict:
         errors="replace",
     )
 
-    return {
-        "file_info": file_info,
-        "format": format_name,
-        "duration": duration_str,
-        "duration_sec": duration_sec,
-        "codec": codec,
-        "has_video": has_video_stream,
-    }
+    return WavConversionResult(
+        file_info=file_info,
+        format_name=format_name,
+        duration_display=duration_str,
+        duration_sec=duration_sec,
+        codec=codec,
+        has_video=has_video_stream,
+        output_path=output_path,
+    )
 
 
 def transcribe_with_canary(
@@ -226,7 +274,7 @@ def transcribe_with_canary(
     source_lang: str = "ru",
     target_lang: str | None = None,
 ) -> str:
-    """Transcribe WAV using NeMo Canary (single-pass inference)."""
+    """Run single-pass transcription for one WAV file and return plain text."""
     model = get_canary_model()
     target_lang = target_lang or source_lang
     log.info("  [canary] starting inference (this may take several minutes)...")
@@ -265,8 +313,8 @@ def get_diarizer():
     return pipeline
 
 
-def run_diarization(wav_path: str) -> list[tuple[float, float, str]]:
-    """Return sorted list of (start_sec, end_sec, speaker_id) tuples."""
+def run_diarization(wav_path: str) -> list[LegacySegment]:
+    """Run speaker diarization and return sorted legacy segments."""
     pipeline = get_diarizer()
     raw = pipeline(wav_path)
     # pyannote >= 3.2 returns DiarizeOutput; older/legacy returns Annotation directly
@@ -278,25 +326,213 @@ def run_diarization(wav_path: str) -> list[tuple[float, float, str]]:
     return sorted(segments, key=lambda x: x[0])
 
 
-def merge_speaker_segments(
-    segments: list[tuple[float, float, str]],
-    gap_threshold: float = 1.0,
-    min_duration: float = 0.5,
-) -> list[tuple[float, float, str]]:
-    """Merge adjacent same-speaker segments with small gaps."""
+def _segment_from_tuple(segment: LegacySegment) -> DiarizationSegment:
+    """Convert a legacy diarization tuple into a named segment."""
+    start, end, speaker = segment
+    return DiarizationSegment(start=float(start), end=float(end), speaker=str(speaker))
+
+
+def _segment_to_tuple(segment: DiarizationSegment) -> LegacySegment:
+    """Convert a named segment back to the legacy tuple shape used by callers."""
+    return (segment.start, segment.end, segment.speaker)
+
+
+def _normalize_output_texts(outputs, expected_count: int) -> list[str]:
+    """Return exactly `expected_count` stripped transcription texts."""
+    texts = [getattr(output, "text", str(output)).strip() for output in (outputs or [])]
+    if len(texts) < expected_count:
+        texts.extend([""] * (expected_count - len(texts)))
+    return texts[:expected_count]
+
+
+def _delete_chunk_files(chunks: list[AudioChunk]) -> None:
+    """Best-effort removal of temporary chunk files."""
+    for chunk in chunks:
+        Path(chunk.path).unlink(missing_ok=True)
+
+
+def _transcribe_chunk_batch(
+    model,
+    chunks: list[AudioChunk],
+    *,
+    source_lang: str,
+    processed_before_batch: int,
+) -> list[str]:
+    """Transcribe one chunk batch and return one text per chunk in input order."""
+    audio_paths = [chunk.path for chunk in chunks]
+    try:
+        outputs = model.transcribe(
+            audio=audio_paths,
+            source_lang=source_lang,
+            target_lang=source_lang,
+        )
+    except Exception as exc:
+        failed_range = f"{processed_before_batch + 1}-{processed_before_batch + len(chunks)}"
+        log.warning("  [canary] chunk batch %s failed: %s", failed_range, exc)
+        return [""] * len(chunks)
+    return _normalize_output_texts(outputs, expected_count=len(chunks))
+
+
+def _build_transcript_line(chunk: AudioChunk, text: str) -> str:
+    """Format a non-empty chunk transcription for the final transcript."""
+    return (
+        f"{format_speaker_timestamp(chunk.segment.start)} "
+        f"[{chunk.segment.speaker}]: {text}"
+    )
+
+
+def _report_chunk_progress(
+    chunk: AudioChunk,
+    *,
+    processed: int,
+    total: int,
+    async_q: asyncio.Queue,
+    loop: asyncio.AbstractEventLoop,
+) -> None:
+    """Publish progress for one completed chunk and log its status."""
+    progress = int(processed / total * 100) if total else 100
+    loop.call_soon_threadsafe(async_q.put_nowait, progress)
+    log.info(
+        "  [canary] segment %d/%d (%s @ %.1fs) done",
+        processed,
+        total,
+        chunk.segment.speaker,
+        chunk.segment.start,
+    )
+
+
+def normalize_diarization_segments(
+    segments: list[LegacySegment],
+    gap_threshold: float = DIARIZATION_GAP_THRESHOLD_SEC,
+    min_duration: float = DIARIZATION_MIN_SEGMENT_SEC,
+) -> list[LegacySegment]:
+    """
+    Normalize diarization spans into monotonic speaker segments.
+
+    Args:
+        segments: Raw `(start, end, speaker)` spans.
+        gap_threshold: Max silent gap allowed when merging same-speaker spans.
+        min_duration: Minimum duration that survives cleanup.
+
+    Returns:
+        Cleaned and merged legacy segments.
+    """
     if not segments:
         return []
-    merged = [list(segments[0])]
-    for start, end, speaker in segments[1:]:
+
+    cleaned: list[DiarizationSegment] = []
+    for raw_segment in sorted((_segment_from_tuple(item) for item in segments), key=lambda item: item.start):
+        start = max(0.0, raw_segment.start)
+        end = max(start, raw_segment.end)
+        if cleaned and start < cleaned[-1].end:
+            # When pyannote returns slight overlaps, prefer keeping chronology stable.
+            start = cleaned[-1].end
+        if (end - start) >= min_duration:
+            cleaned.append(DiarizationSegment(start=start, end=end, speaker=raw_segment.speaker))
+
+    if not cleaned:
+        return []
+
+    merged = [cleaned[0]]
+    for segment in cleaned[1:]:
         prev = merged[-1]
-        if speaker == prev[2] and (start - prev[1]) < gap_threshold:
-            prev[1] = end
+        if segment.speaker == prev.speaker and (segment.start - prev.end) <= gap_threshold:
+            merged[-1] = DiarizationSegment(
+                start=prev.start,
+                end=segment.end,
+                speaker=prev.speaker,
+            )
         else:
-            merged.append([start, end, speaker])
-    return [(s, e, sp) for s, e, sp in merged if (e - s) >= min_duration]
+            merged.append(segment)
+    return [_segment_to_tuple(segment) for segment in merged if (segment.end - segment.start) >= min_duration]
+
+
+def split_long_speaker_segments(
+    segments: list[LegacySegment],
+    max_duration: float = DIARIZATION_MAX_SEGMENT_SEC,
+    min_duration: float = DIARIZATION_MIN_SEGMENT_SEC,
+) -> list[LegacySegment]:
+    """
+    Split long same-speaker spans into shorter ASR-friendly pieces.
+
+    Args:
+        segments: Cleaned diarization spans.
+        max_duration: Maximum preferred chunk duration in seconds.
+        min_duration: Minimum chunk duration to keep.
+
+    Returns:
+        Speaker segments capped to the requested maximum duration.
+    """
+    result: list[DiarizationSegment] = []
+    for segment in map(_segment_from_tuple, segments):
+        duration = segment.end - segment.start
+        if duration <= max_duration:
+            result.append(segment)
+            continue
+
+        parts = max(2, int(duration // max_duration) + (1 if duration % max_duration else 0))
+        chunk_duration = duration / parts
+        cursor = segment.start
+        while cursor < segment.end:
+            chunk_end = min(segment.end, cursor + chunk_duration)
+            if (chunk_end - cursor) >= min_duration:
+                result.append(
+                    DiarizationSegment(
+                        start=cursor,
+                        end=chunk_end,
+                        speaker=segment.speaker,
+                    )
+                )
+            cursor = chunk_end
+    return [_segment_to_tuple(segment) for segment in result]
+
+
+def prepare_diarized_turns(
+    segments: list[LegacySegment],
+    *,
+    gap_threshold: float = DIARIZATION_GAP_THRESHOLD_SEC,
+    min_duration: float = DIARIZATION_MIN_SEGMENT_SEC,
+    max_duration: float = DIARIZATION_MAX_SEGMENT_SEC,
+) -> list[LegacySegment]:
+    """
+    Convert raw diarization output into stable speaker turns for transcription.
+
+    Args:
+        segments: Raw diarization spans.
+        gap_threshold: Max gap for same-speaker merge.
+        min_duration: Minimum segment duration to keep.
+        max_duration: Maximum duration of a returned segment.
+
+    Returns:
+        Speaker turns ready for chunk extraction and ASR.
+    """
+    normalized = normalize_diarization_segments(
+        segments,
+        gap_threshold=gap_threshold,
+        min_duration=min_duration,
+    )
+    return split_long_speaker_segments(
+        normalized,
+        max_duration=max_duration,
+        min_duration=min_duration,
+    )
+
+
+def format_speaker_timestamp(start: float) -> str:
+    whole = int(start)
+    h = whole // 3600
+    m = (whole % 3600) // 60
+    s = whole % 60
+    return f"[{h:02d}:{m:02d}:{s:02d}]"
 
 
 def extract_audio_chunk(wav_path: str, start: float, end: float, out_path: str) -> bool:
+    """
+    Extract one mono 16 kHz WAV chunk for a time range.
+
+    Returns:
+        `True` when the chunk file was created successfully, otherwise `False`.
+    """
     cmd = [
         "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
         "-ss", str(start), "-to", str(end),
@@ -308,83 +544,112 @@ def extract_audio_chunk(wav_path: str, start: float, end: float, out_path: str) 
     return result.returncode == 0 and os.path.exists(out_path)
 
 
-def batched(items: list[tuple[float, float, str, str]], batch_size: int) -> list[list[tuple[float, float, str, str]]]:
+def prepare_audio_chunks(
+    wav_path: str,
+    segments: list[LegacySegment],
+    tmp_dir: str,
+) -> list[AudioChunk]:
+    """
+    Materialize WAV chunks for diarized speaker segments.
+
+    Args:
+        wav_path: Source WAV file.
+        segments: Speaker segments to extract.
+        tmp_dir: Directory where temporary chunk files will be created.
+
+    Returns:
+        Successfully extracted chunks in input order.
+    """
+    prepared_chunks: list[AudioChunk] = []
+    for i, segment in enumerate(map(_segment_from_tuple, segments), 1):
+        chunk_path = str(Path(tmp_dir) / f"chunk_{i:04d}.wav")
+        if not extract_audio_chunk(wav_path, segment.start, segment.end, chunk_path):
+            log.warning("  [canary] chunk %d: ffmpeg extraction failed", i)
+            continue
+        prepared_chunks.append(AudioChunk(segment=segment, path=chunk_path))
+    return prepared_chunks
+
+
+def batched(items: list[AudioChunk], batch_size: int) -> list[list[AudioChunk]]:
+    """Split items into stable in-memory batches."""
     return [items[i : i + batch_size] for i in range(0, len(items), batch_size)]
 
 
 def transcribe_by_segments(
     wav_path: str,
-    segments: list[tuple[float, float, str]],
+    segments: list[LegacySegment],
     async_q: asyncio.Queue,
     loop: asyncio.AbstractEventLoop,
     source_lang: str = "ru",
     tmp_dir: str | None = None,
 ) -> str:
-    """Transcribe audio by speaker segments; return timestamped speaker-labeled transcript."""
+    """
+    Transcribe audio by diarized speaker turns.
+
+    Args:
+        wav_path: Source mono WAV file.
+        segments: Raw or preprocessed diarization spans.
+        async_q: Progress queue that receives integer percentages and a final `None`.
+        loop: Event loop used to publish progress safely from this worker.
+        source_lang: Source language passed to Canary.
+        tmp_dir: Optional directory for chunk files. If omitted, a temp dir is created and removed.
+
+    Returns:
+        Timestamped and speaker-labeled transcript text.
+    """
     model = get_canary_model()
-    merged = merge_speaker_segments(segments)
-    results = []
+    prepared_segments = prepare_diarized_turns(segments)
+    transcript_lines: list[str] = []
     _tmp = tmp_dir or tempfile.mkdtemp(prefix="canary_chunks_")
     cleanup = tmp_dir is None
     try:
-        total = len(merged)
-        prepared_chunks: list[tuple[float, float, str, str]] = []
-        for i, (start, end, speaker) in enumerate(merged, 1):
-            chunk_path = str(Path(_tmp) / f"chunk_{i:04d}.wav")
-            if not extract_audio_chunk(wav_path, start, end, chunk_path):
-                log.warning("  [canary] chunk %d: ffmpeg extraction failed", i)
-                continue
-            prepared_chunks.append((start, end, speaker, chunk_path))
+        prepared_chunks = prepare_audio_chunks(wav_path, prepared_segments, _tmp)
+        total = len(prepared_chunks)
 
         processed = 0
         for batch in batched(prepared_chunks, CANARY_SEGMENT_BATCH_SIZE):
-            audio_paths = [chunk_path for _, _, _, chunk_path in batch]
-            texts: list[str]
             try:
-                outputs = model.transcribe(
-                    audio=audio_paths,
+                texts = _transcribe_chunk_batch(
+                    model,
+                    batch,
                     source_lang=source_lang,
-                    target_lang=source_lang,
+                    processed_before_batch=processed,
                 )
-                texts = [
-                    getattr(output, "text", str(output)).strip()
-                    for output in (outputs or [])
-                ]
-            except Exception as exc:
-                for _, _, _, chunk_path in batch:
-                    Path(chunk_path).unlink(missing_ok=True)
-                failed_range = f"{processed + 1}-{processed + len(batch)}"
-                log.warning("  [canary] chunk batch %s failed: %s", failed_range, exc)
-                texts = [""] * len(batch)
-            else:
-                if len(texts) < len(batch):
-                    texts.extend([""] * (len(batch) - len(texts)))
-                for _, _, _, chunk_path in batch:
-                    Path(chunk_path).unlink(missing_ok=True)
+            finally:
+                _delete_chunk_files(batch)
 
-            for (start, _, speaker, _), text in zip(batch, texts):
+            for chunk, text in zip(batch, texts):
                 processed += 1
-                loop.call_soon_threadsafe(async_q.put_nowait, int(processed / total * 100))
                 if text:
-                    h = int(start // 3600)
-                    m = int((start % 3600) // 60)
-                    s = int(start % 60)
-                    results.append(f"[{h:02d}:{m:02d}:{s:02d}] [{speaker}]: {text}")
-                log.info(
-                    "  [canary] segment %d/%d (%s @ %.1fs) done",
-                    processed,
-                    total,
-                    speaker,
-                    start,
+                    transcript_lines.append(_build_transcript_line(chunk, text))
+                _report_chunk_progress(
+                    chunk,
+                    processed=processed,
+                    total=total,
+                    async_q=async_q,
+                    loop=loop,
                 )
     finally:
         if cleanup:
             shutil.rmtree(_tmp, ignore_errors=True)
     loop.call_soon_threadsafe(async_q.put_nowait, None)
-    return "\n".join(results)
+    return "\n".join(transcript_lines)
 
 
-def prepare_audio(audio_path: str, target_sr: int = 16000) -> str:
+def prepare_audio(audio_path: str, target_sr: int = 16000) -> PreparedAudio:
+    """
+    Convert an input media file into a temporary mono WAV for transcription.
+
+    Args:
+        audio_path: Path to source media.
+        target_sr: Target sample rate in Hz.
+
+    Returns:
+        Prepared audio metadata with the temp directory ownership.
+
+    Raises:
+        RuntimeError: If ffmpeg fails to create the WAV file.
+    """
     source = Path(audio_path).expanduser().resolve()
     tmpdir = Path(tempfile.mkdtemp(prefix="canary_"))
     out_path = tmpdir / f"{source.stem}_mono_{target_sr}.wav"
@@ -404,7 +669,7 @@ def prepare_audio(audio_path: str, target_sr: int = 16000) -> str:
     result = subprocess.run(cmd, capture_output=True)
     if result.returncode != 0:
         raise RuntimeError(tail_text(result.stderr.decode(errors="replace")))
-    return str(out_path)
+    return PreparedAudio(path=str(out_path), temp_dir=str(tmpdir))
 
 
 def main() -> int:
@@ -428,16 +693,16 @@ def main() -> int:
     prepared = prepare_audio(audio_path)
     try:
         outputs = get_canary_model().transcribe(
-            audio=[prepared],
+            audio=[prepared.path],
             source_lang=args.source_lang,
             target_lang=target_lang,
         )
     except Exception as exc:
         print(f"Transcription failed: {exc}", file=sys.stderr)
-        shutil.rmtree(str(Path(prepared).parent), ignore_errors=True)
+        prepared.cleanup()
         return 1
 
-    shutil.rmtree(str(Path(prepared).parent), ignore_errors=True)
+    prepared.cleanup()
     if not outputs:
         print("No output from model.", file=sys.stderr)
         return 1

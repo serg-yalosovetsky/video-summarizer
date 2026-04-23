@@ -26,6 +26,9 @@ CLEAN_SYSTEM = (
     "- Do NOT add any content that was not in the original\n"
     "- Preserve speaker intent and all factual content\n"
     "- Preserve every existing [HH:MM:SS] timestamp exactly as written\n"
+    "- Preserve the original order of lines\n"
+    "- Never drop the ending of the transcript, even if the text is noisy or repetitive\n"
+    "- For timestamped transcript input, keep the same number of timestamped entries whenever possible\n"
     "- The transcript may contain [SPEAKER_XX] labels from diarization. "
     "If visual context identifies who SPEAKER_00, SPEAKER_01 etc. are, "
     "replace [SPEAKER_XX] with the actual person's name. "
@@ -46,8 +49,12 @@ CLEAN_PROMPT_TEMPLATE = (
     "Preserve timestamps exactly where they already exist. "
     "If speaker identity is clear from the visual context above, add [Speaker Name]: "
     "after the timestamp and before the spoken text on transcript lines only. "
-    "Do not add new timestamps to chat messages.\n\n"
-    "Content:\n{transcript}"
+    "Do not add new timestamps to chat messages.\n"
+    "Keep the same order of lines. Do not merge distant lines. Do not omit the tail of the text.\n"
+    "If a line is unclear, keep it close to the original instead of rewriting aggressively.\n\n"
+    "---\n"
+    "{transcript}\n"
+    "---"
 )
 
 SUMMARY_SYSTEM = (
@@ -57,7 +64,7 @@ SUMMARY_SYSTEM = (
 )
 
 SUMMARY_PROMPT_TEMPLATE = (
-    "Based on the following content, provide a comprehensive summary in the SAME LANGUAGE as the input. "
+    "Read the transcript below and provide a comprehensive summary in the SAME LANGUAGE as the transcript.\n\n"
     "The summary must include:\n\n"
     "1. **Main Topic**: What this content is about in 1-2 sentences\n"
     "2. **Key Points**: The most important points covered (bullet list)\n"
@@ -65,20 +72,19 @@ SUMMARY_PROMPT_TEMPLATE = (
     "4. **What concerns {user_name}**: highlight all mentions, tasks, requests, blockers, decisions, risks, or follow-ups "
     "that concern {user_name} or these aliases: {user_aliases}. If there is nothing relevant, say so explicitly.\n"
     "5. **Conclusion**: Main takeaway or outcome\n\n"
-    "Content:\n{transcript}"
+    "Transcript:\n---\n{transcript}\n---"
 )
 
 SHORT_SUMMARY_PROMPT_TEMPLATE = (
-    "Write a structured short summary of the following content. "
-    "The summary should be approximately 10% of the length of the full content.\n\n"
-    "If the content is about a problem someone is trying to solve (e.g. a call, meeting, or discussion), structure the summary as:\n"
+    "Read the transcript below and write a structured short summary (approximately 10% of the original length).\n\n"
+    "If the transcript is about a problem or discussion, structure as:\n"
     "- **Problem**: what issue is being addressed\n"
     "- **Ways to solve**: approaches or actions taken/proposed\n"
     "- **Blockers**: obstacles preventing resolution\n"
     "- **Estimated resolution**: timeframe or next steps if mentioned\n\n"
-    "If the content is not about solving a problem, write a plain structured summary covering the key points.\n\n"
-    "Use the SAME LANGUAGE as the input. Output only the summary, no commentary.\n\n"
-    "Content:\n{transcript}"
+    "Otherwise write a plain structured summary of the key points.\n\n"
+    "Use the SAME LANGUAGE as the transcript. Output only the summary.\n\n"
+    "Transcript:\n---\n{transcript}\n---"
 )
 
 PERSONAL_TODO_SYSTEM = (
@@ -88,7 +94,7 @@ PERSONAL_TODO_SYSTEM = (
 )
 
 PERSONAL_TODO_PROMPT_TEMPLATE = (
-    "Extract action items assigned to {user_name} from this meeting transcript. "
+    "Read the meeting transcript below and extract action items assigned to {user_name}. "
     "{user_name} may also appear as: {user_aliases}.\n\n"
     "Rules:\n"
     "- Include ONLY tasks explicitly assigned to or requested of {user_name}\n"
@@ -98,7 +104,7 @@ PERSONAL_TODO_PROMPT_TEMPLATE = (
     "  (use timestamp and speaker name exactly as they appear in the transcript)\n"
     "- If no tasks are assigned to {user_name}, output one line: "
     "'Задач для {user_name} не найдено.'\n\n"
-    "Transcript:\n{transcript}"
+    "Transcript:\n---\n{transcript}\n---"
 )
 
 MEETING_DETECTION_SYSTEM = (
@@ -119,7 +125,7 @@ MEETING_SUMMARY_SYSTEM = (
 )
 
 MEETING_SUMMARY_PROMPT_TEMPLATE = (
-    "Analyze the following meeting transcript and produce a structured summary "
+    "Read the meeting transcript below and produce a structured summary "
     "in the SAME LANGUAGE as the transcript.\n\n"
     "The summary must include exactly these sections:\n\n"
     "1. **Тема встречи**: What the meeting was about (1-2 sentences)\n"
@@ -131,7 +137,7 @@ MEETING_SUMMARY_PROMPT_TEMPLATE = (
     "deadlines, decisions, and follow-ups related to {user_name} or these aliases: {user_aliases}. "
     "If nothing concerns {user_name}, say so explicitly.\n"
     "7. **Краткое описание**: 3-5 sentence overall description of the meeting\n\n"
-    "Transcript:\n{transcript}"
+    "Transcript:\n---\n{transcript}\n---"
 )
 
 SPEAKER_FRAME_SYSTEM = (

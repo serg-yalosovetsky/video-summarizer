@@ -79,13 +79,28 @@ ollama pull gemma4:27b
 ollama serve
 ```
 
-### 5. Configure environment (optional)
+### 5. Configure environment
 
-Create a `.env` file in the project root if `nvidia/canary-1b-v2` is gated on HuggingFace:
+Copy the template and edit what you need:
+
+```bash
+cp .env.example .env
+```
+
+The main settings most users change are:
 
 ```env
+USER_PRIMARY_NAME=Сергей
+USER_ALIASES=Сергей,Сергій,Serhii
 HF_TOKEN=hf_your_token_here
+OLLAMA_BASE_URL=http://localhost:11434
+OLLAMA_MODEL=gemma4:e4b
+FRAME_MODEL=gemma4:e4b
+CANARY_DEVICE=cuda
 ```
+
+`USER_PRIMARY_NAME` and `USER_ALIASES` are used in the personalized summary sections like "What concerns ..." and personal meeting todos.
+If these variables are set in `.env`, they take priority over `.omx/project-memory.json`.
 
 The app defaults to `CANARY_DEVICE=cuda` and will fail fast if CUDA is unavailable instead of silently using CPU.
 If you intentionally want CPU fallback for debugging, set:
@@ -176,7 +191,8 @@ video-summarizer/
 ├── requirements.txt
 ├── static/
 │   └── index.html    # Single-page frontend
-└── .env              # HF token (not committed)
+├── .env.example      # Config template for new users
+└── .env              # Local overrides (not committed)
 ```
 
 ---

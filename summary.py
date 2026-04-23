@@ -49,6 +49,9 @@ MISSING_CONTENT_RESPONSE_PATTERNS = (
     "i'm ready to create the comprehensive",
     "once the text is available",
 )
+TIMESTAMP_RE = re.compile(r"\[\d{2}:\d{2}:\d{2}\]")
+SUMMARY_DIRECT_MAX_CHARS = 12000
+SUMMARY_CHUNK_TARGET_CHARS = 6000
 
 
 def trim_visual_context(visual_context: str) -> str:
@@ -94,18 +97,74 @@ def prefer_meaningful_content(primary: str, fallback: str) -> str:
     return local_preclean_content(fallback)
 
 
+def count_timestamps(text: str) -> int:
+    return len(TIMESTAMP_RE.findall(text or ""))
+
+
+def preserves_timestamp_structure(source: str, candidate: str) -> bool:
+    source_count = count_timestamps(source)
+    if source_count == 0:
+        return True
+    candidate_count = count_timestamps(candidate)
+    if candidate_count == 0:
+        return False
+    if candidate_count < max(1, int(source_count * 0.8)):
+        return False
+    source_ts = TIMESTAMP_RE.findall(source)
+    candidate_ts = TIMESTAMP_RE.findall(candidate)
+    return source_ts[:3] == candidate_ts[:3] and source_ts[-3:] == candidate_ts[-3:]
+
+
+def split_for_summary(text: str, target_chars: int = SUMMARY_CHUNK_TARGET_CHARS) -> list[str]:
+    text = local_preclean_content(text)
+    if len(text) <= target_chars:
+        return [text]
+
+    chunks: list[str] = []
+    current: list[str] = []
+    current_len = 0
+    for block in text.split("\n\n"):
+        block = block.strip()
+        if not block:
+            continue
+        block_len = len(block) + 2
+        if current and current_len + block_len > target_chars:
+            chunks.append("\n\n".join(current))
+            current = [block]
+            current_len = block_len
+            continue
+        if len(block) > target_chars:
+            lines = [line for line in block.splitlines() if line.strip()]
+            for line in lines:
+                if current and current_len + len(line) + 1 > target_chars:
+                    chunks.append("\n\n".join(current))
+                    current = []
+                    current_len = 0
+                current.append(line)
+                current_len += len(line) + 1
+            continue
+        current.append(block)
+        current_len += block_len
+    if current:
+        chunks.append("\n\n".join(current))
+    return chunks or [text]
+
+
 def clean_content(transcript: str, visual_context: str = "") -> str:
     normalized_transcript = local_preclean_content(transcript)
     prompt = CLEAN_PROMPT_TEMPLATE.format(
         context_block=build_context_block(visual_context),
         transcript=normalized_transcript,
     )
-    return call_ollama(
+    cleaned = call_ollama(
         prompt,
         CLEAN_SYSTEM,
         model=OLLAMA_CLEAN_MODEL,
         options=OLLAMA_CLEAN_OPTIONS,
     )
+    if preserves_timestamp_structure(normalized_transcript, cleaned):
+        return cleaned
+    return normalized_transcript
 
 
 def classify_is_meeting(text: str) -> bool:
@@ -118,10 +177,33 @@ def classify_is_meeting(text: str) -> bool:
     return raw.startswith("yes")
 
 
-def generate_summary(transcript: str, *, is_meeting: bool = False) -> str:
+def generate_summary(
+    transcript: str,
+    *,
+    is_meeting: bool = False,
+    options_override: dict | None = None,
+) -> str:
+    transcript = local_preclean_content(transcript)
     user_profile = load_user_profile()
     user_name = user_profile["primary_name"]
     user_aliases = ", ".join(user_profile["aliases"])
+    opts = {**OLLAMA_SUMMARY_OPTIONS, **(options_override or {})}
+
+    if len(transcript) > SUMMARY_DIRECT_MAX_CHARS:
+        chunk_summaries = []
+        for index, chunk in enumerate(split_for_summary(transcript), start=1):
+            chunk_prompt = (
+                "Summarize this transcript chunk for later merging into one final summary.\n"
+                "Preserve names, decisions, tasks, blockers, numbers, and technical terms.\n"
+                "Be concise but do not omit concrete responsibilities.\n\n"
+                f"Chunk {index}:\n---\n{chunk}\n---"
+            )
+            chunk_summaries.append(call_ollama(chunk_prompt, SUMMARY_SYSTEM, options=opts))
+        transcript = "\n\n".join(
+            f"Chunk {index} summary:\n{item}"
+            for index, item in enumerate(chunk_summaries, start=1)
+        )
+
     if is_meeting:
         prompt = MEETING_SUMMARY_PROMPT_TEMPLATE.format(
             transcript=transcript,
@@ -136,22 +218,32 @@ def generate_summary(transcript: str, *, is_meeting: bool = False) -> str:
             user_aliases=user_aliases,
         )
         system = SUMMARY_SYSTEM
-    return call_ollama(prompt, system, options=OLLAMA_SUMMARY_OPTIONS)
+    return call_ollama(prompt, system, options=opts)
 
 
-def generate_short_summary(transcript: str) -> str:
+def generate_short_summary(
+    transcript: str,
+    *,
+    options_override: dict | None = None,
+) -> str:
     prompt = SHORT_SUMMARY_PROMPT_TEMPLATE.format(transcript=transcript)
-    return call_ollama(prompt, SUMMARY_SYSTEM, options=OLLAMA_SUMMARY_OPTIONS)
+    opts = {**OLLAMA_SUMMARY_OPTIONS, **(options_override or {})}
+    return call_ollama(prompt, SUMMARY_SYSTEM, options=opts)
 
 
-def generate_personal_todo(transcript: str) -> str:
+def generate_personal_todo(
+    transcript: str,
+    *,
+    options_override: dict | None = None,
+) -> str:
     user_profile = load_user_profile()
     prompt = PERSONAL_TODO_PROMPT_TEMPLATE.format(
         transcript=transcript,
         user_name=user_profile["primary_name"],
         user_aliases=", ".join(user_profile["aliases"]),
     )
-    return call_ollama(prompt, PERSONAL_TODO_SYSTEM, options=OLLAMA_SUMMARY_OPTIONS)
+    opts = {**OLLAMA_SUMMARY_OPTIONS, **(options_override or {})}
+    return call_ollama(prompt, PERSONAL_TODO_SYSTEM, options=opts)
 
 
 def detect_language_heuristically(text: str) -> str:

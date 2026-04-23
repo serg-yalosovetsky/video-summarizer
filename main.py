@@ -85,6 +85,7 @@ from summary import (
     generate_personal_todo,
     generate_short_summary,
     generate_summary,
+    local_preclean_content,
     looks_like_missing_content_response,
     prefer_meaningful_content,
     translate_summary_to_russian,
@@ -93,7 +94,7 @@ from contextlib import asynccontextmanager
 
 OLLAMA_MODEL = settings.ollama_model
 OLLAMA_CLEAN_MODEL = settings.ollama_clean_model
-ARTIFACTS_DIR = settings.base_dir / "artifacts"
+ARTIFACTS_DIR = settings.artifacts_dir
 ARTIFACTS_DIR.mkdir(exist_ok=True)
 
 from transcribe import (
@@ -404,18 +405,22 @@ async def process_generator(
         else:
             log.info("► No video file - chat-only mode")
 
-        combined = combine_sources(raw_transcript, chat_text)
-
         yield sse("status", {"message": "Cleaning content with Gemma..."})
         log.info("  [gemma/clean] calling ollama...")
         t0 = time.monotonic()
         try:
-            cleaned_text = await loop.run_in_executor(
-                None,
-                clean_content,
-                combined,
-                visual_context,
-            )
+            cleaned_transcript = ""
+            cleaned_chat = ""
+            if raw_transcript.strip():
+                cleaned_transcript = await loop.run_in_executor(
+                    None,
+                    clean_content,
+                    raw_transcript,
+                    visual_context,
+                )
+            if chat_text.strip():
+                cleaned_chat = local_preclean_content(chat_text)
+            cleaned_text = combine_sources(cleaned_transcript, cleaned_chat)
         except Exception as exc:
             log.error("  [gemma/clean] ERROR: %s", exc)
             yield sse(
@@ -425,6 +430,7 @@ async def process_generator(
             return
         log.info("  [gemma/clean] done  (%.2fs)", time.monotonic() - t0)
         cleaned_text = remove_repetitions(cleaned_text)
+        combined = combine_sources(raw_transcript, chat_text)
         cleaned_text = prefer_meaningful_content(cleaned_text, combined)
         if looks_like_missing_content_response(cleaned_text):
             log.warning("  [gemma/clean] model returned missing-content placeholder; using combined source text")
@@ -492,11 +498,26 @@ async def process_generator(
             )
             return
         if looks_like_missing_content_response(summary_text):
-            log.warning("  [gemma/summary] model returned missing-content placeholder; retrying once with fallback input")
+            log.warning("  [gemma/summary] model returned missing-content placeholder; retrying with temperature=0.3 and truncated input")
+            truncated = summary_input[:8000]
             summary_text = await loop.run_in_executor(
                 None,
-                lambda: generate_summary(summary_input, is_meeting=is_meeting),
+                lambda: generate_summary(truncated, is_meeting=is_meeting, options_override={"temperature": 0.3}),
             )
+            if looks_like_missing_content_response(summary_text):
+                log.error("  [gemma/summary] both attempts failed — model cannot process the content")
+                yield sse(
+                    "error",
+                    {
+                        "message": (
+                            "Модель не змогла обробити транскрипцію. "
+                            "Можливо, текст занадто довгий або модель не підтримує цей формат. "
+                            "Очищена транскрипція доступна для перегляду."
+                        ),
+                        "stage": "summary",
+                    },
+                )
+                return
         log.info("  [gemma/summary] done  (%.2fs)", time.monotonic() - summary_t0)
 
         russian_summary_text = None
@@ -544,13 +565,17 @@ async def process_generator(
             )
             return
         if looks_like_missing_content_response(tldr_text):
-            log.warning("  [gemma/%s] model returned missing-content placeholder; retrying once with fallback input", tldr_stage)
+            log.warning("  [gemma/%s] model returned missing-content placeholder; retrying with temperature=0.3", tldr_stage)
+            truncated = summary_input[:8000]
             retry_callable = (
-                (lambda: generate_personal_todo(summary_input))
+                (lambda: generate_personal_todo(truncated, options_override={"temperature": 0.3}))
                 if is_meeting
-                else (lambda: generate_short_summary(summary_input))
+                else (lambda: generate_short_summary(truncated, options_override={"temperature": 0.3}))
             )
             tldr_text = await loop.run_in_executor(None, retry_callable)
+            if looks_like_missing_content_response(tldr_text):
+                log.warning("  [gemma/%s] both attempts failed — skipping tldr", tldr_stage)
+                tldr_text = "Не вдалося згенерувати короткий підсумок."
         log.info("  [gemma/%s] done  (%.2fs)", tldr_stage, time.monotonic() - tldr_t0)
         yield sse(
             "tldr_done",

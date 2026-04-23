@@ -50,6 +50,10 @@ OLLAMA_CLEAN_MODEL = settings.ollama_clean_model
 MAX_UPLOAD_BYTES = settings.max_upload_bytes
 LOCAL_TMP = str(settings.local_tmp)
 PROJECT_MEMORY_PATH = str(settings.project_memory_path)
+DEFAULT_USER_PROFILE = {
+    "primary_name": settings.user_primary_name,
+    "aliases": list(settings.user_aliases),
+}
 
 
 def tail_text(text: str, limit: int = 500) -> str:
@@ -179,7 +183,7 @@ def call_ollama(
     prompt: str,
     system: str = "",
     *,
-    timeout: float = 900.0,
+    timeout: float | None = None,
     model: str | None = None,
     options: dict | None = None,
 ) -> str:
@@ -192,7 +196,7 @@ def call_ollama(
             "stream": False,
             "options": options or {},
         },
-        timeout=timeout,
+        timeout=timeout or settings.ollama_timeout_seconds,
     )
     response.raise_for_status()
     return response.json()["response"]
@@ -200,10 +204,9 @@ def call_ollama(
 
 @lru_cache(maxsize=1)
 def load_user_profile() -> dict:
-    profile = {
-        "primary_name": "Сергей",
-        "aliases": ["Сергей", "Сергій", "Serhii"],
-    }
+    profile = DEFAULT_USER_PROFILE.copy()
+    if settings.user_profile_overridden:
+        return profile
     try:
         with open(PROJECT_MEMORY_PATH, "r", encoding="utf-8") as file_handle:
             data = json.load(file_handle)

@@ -381,6 +381,38 @@ class SummaryHelperTests(unittest.TestCase):
         )
 
 
+class DiarizationPreparationTests(unittest.TestCase):
+    def test_prepare_diarized_turns_normalizes_overlaps_and_merges_same_speaker(self):
+        segments = [
+            (4.0, 5.0, "SPEAKER_01"),
+            (0.0, 1.0, "SPEAKER_00"),
+            (1.0, 2.2, "SPEAKER_00"),
+            (2.1, 3.0, "SPEAKER_01"),
+        ]
+
+        prepared = transcribe.prepare_diarized_turns(segments)
+
+        self.assertEqual(
+            prepared,
+            [
+                (0.0, 2.2, "SPEAKER_00"),
+                (2.2, 3.0, "SPEAKER_01"),
+                (4.0, 5.0, "SPEAKER_01"),
+            ],
+        )
+
+    def test_prepare_diarized_turns_splits_long_monologue(self):
+        segments = [(0.0, 45.0, "SPEAKER_00")]
+
+        prepared = transcribe.prepare_diarized_turns(segments, max_duration=20.0)
+
+        self.assertEqual(len(prepared), 3)
+        self.assertEqual(prepared[0][2], "SPEAKER_00")
+        self.assertLessEqual(prepared[0][1] - prepared[0][0], 20.0)
+        self.assertEqual(prepared[0][0], 0.0)
+        self.assertEqual(prepared[-1][1], 45.0)
+
+
 class NotificationTests(unittest.IsolatedAsyncioTestCase):
     def test_ntfy_payload_supports_unicode_title(self):
         payload = helpers._ntfy_payload("Готово", "Видео обработано")

@@ -4,7 +4,10 @@
       "Bash(venv/Scripts/pip install *)",
       "Bash(python -c \"from frames_analyze import analyze_speaker_frames; from main import process_generator; print\\('OK'\\)\")",
       "Bash(.venv/bin/python -c \"from frames_analyze import analyze_speaker_frames; print\\('frames_analyze OK'\\)\")",
-      "Bash(.venv/bin/python -c ' *)"
+      "Bash(.venv/bin/python -c ' *)",
+      "Bash(python -c \"from summary import generate_summary, generate_short_summary, generate_personal_todo; from prompts import CLEAN_PROMPT_TEMPLATE, SUMMARY_PROMPT_TEMPLATE; print\\('imports OK'\\); t = 'test transcript'; print\\(SUMMARY_PROMPT_TEMPLATE.format\\(transcript=t, user_name='Сергей', user_aliases='Serhii'\\)[-100:]\\)\")",
+      "Bash(python -m py_compile summary.py prompts.py)",
+      "Bash(python -m py_compile main.py)"
     ]
   }
 }

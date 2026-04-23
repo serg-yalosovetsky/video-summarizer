@@ -1,0 +1,125 @@
+[Pavlo Negadailov]: No, no.
+[Pavlo Negadailov]: Oh, love is here. Hi, guys. Hi, guys.
+[Pavlo Negadailov]: Okay, let's start with.
+[Pavlo Negadailov]: Uh...
+[Pavlo Negadailov]: AI agentic tool, and then go to regulation traceability. So again, let's start from your
+[Pavlo Negadailov]: So he...
+[Pavlo Negadailov]: Ah, yeah.
+[Pavlo Negadailov]: I don't hear me.
+[Pavlo Negadailov]: I'm sorry.
+[Pavlo Negadailov]: Okay, yep, yep, I hear you. I don't hear you, Sergio, in your speech. Okay, I read this repo and I split it to front end and back end.
+[Pavlo Negadailov]: I remember you told me about something about that I should split it into three or four parts.
+[Pavlo Negadailov]: But I currently can't find how I should split it further because it is really only packages with MCP servers and the content.
+[Mohammad Moazam]: So front end, back end, MCP servers are three, and the rest of it is fourth. That is the AI part, like where we are connecting the deep agents library, the AI code—that's the fourth.
+[Mohammad Moazam]: So it is everything that is in packages.
+[Mohammad Moazam]: Everything is.
+[Pavlo Negadailov]: Everything is in packages, it is MCP servers, and...
+[Pavlo Negadailov]: Yeah.
+[Serhii Yalosovetsky]: Packages also contains the agentic back end. One of the packages you could say is the
+[Pavlo Negadailov]: Sorry, sorry, I can't hear you clearly.
+[Mohammad Moazam]: So the code for the AI, the fourth part apart from MCP, is in packages. You can see something like subagents, deep agents, UOC skills. Yeah. That should be a separate repository. That's basically the AI back end.
+[Pavlo Negadailov]: Yeah, yeah.
+[Pavlo Negadailov]: In agent service, in published agent service.
+[Mohammad Moazam]: Agent setup. Yeah.
+[Pavlo Negadailov]: Okay, okay, yeah, I see. So it should be backend here and all other in-packages. It is MCP server.
+[Pavlo Negadailov]: There are also common in Harbour.
+[Serhii Yalosovetsky]: So Harbour is the evaluation.
+[Mohammad Moazam]: framework.
+[Mohammad Moazam]: I would say keep it with the with the AI back end code.
+[Pavlo Negadailov]: So Harbor keeps this backend code with agent service.
+[Pavlo Negadailov]: Yes. And common it should be common in the back end and in the MCP.
+[Mohammad Moazam]: Yeah, so common again, like that, you need to see what it is linked with. If it is linked to the agent tech code, then it will remain there. If it is some part of it is used in the back end, you need to transfer certain personal portions to that repository. So you need to segment that.
+[Pavlo Negadailov]: Okay, yep. But it is three servers. So it is front end, it is agent service in the packages, and the rest MCP servers. So it is three repo.
+[Mohammad Moazam]: No, no, no. So back end, so okay. So there we need back end needs to be divided into AI part and then the web application part. So we will separate the middleware. Like, for example, if you have FastAPI router or something like that, it needs to be a separate repository. I think that layer will handle in future authentication, other services. The AI code will be separate.
+[Pavlo Negadailov]: Yeah. Makes sense? Yeah. Okay. Yeah. Okay. Okay. Yeah. I will do it.
+[Mohammad Moazam]: That makes sense.
+[Mohammad Moazam]: You need to wrap the AI code into a Python module, a Python package that can be installed in the middleware as a dependency similar to Regulation Project. I'm not sure if you have seen that. We'll follow a similar kind of architecture there.
+[Serhii Yalosovetsky]: Okay.
+[Serhii Yalosovetsky]: Is similar to what project?
+[Mohammad Moazam]: Regulation project in the AI code and how the middle middleware acts like the web back end and then the front end. You can get some inspiration from that. You can also you can discuss with Lib.
+[Pavlo Negadailov]: Okay, regulation project is in the repository.
+[Pavlo Negadailov]: Yeah.
+[Pavlo Negadailov]: Regulation Project.
+[Pavlo Negadailov]: Are we using NCP servers for a glacier project only for this?
+[Pavlo Negadailov]: VF regulation facade and VF regulation proto.
+[Pavlo Negadailov]: All right.
+[Pavlo Negadailov]: Also, there is some problem with splitting the code because when this was Monorepo, so tests can test how back-end communicates with front-end, how it all works, and we can run e to e tests, but it is not possible that simple with splitting Repo.
+[Mohammad Moazam]: Yeah, that makes sense. Of course, that will not be the same.
+[Mohammad Moazam]: I would say in that case, let's not focus on that at this point.
+[Pavlo Negadailov]: Okay, okay.
+[Pavlo Negadailov]: Is it correctly that it should also build Docker images for all of this?
+[Mohammad Moazam]: For most of them, yes. For AI backend, you can copy. We basically store the Python package in an artifact repository. So we can use the same. So again, I would say refer to the regulation project and you can basically just use the same methodology in this project as well.
+[Pavlo Negadailov]: the same.
+[Pavlo Negadailov]: Okay, so for all of these except AI core, I should build Docker image, but for AI core, I should build Python package.
+[Pavlo Negadailov]: Yeah. Okay, okay.
+[Pavlo Negadailov]: Good.
+[Pavlo Negadailov]: Pressam, regarding this project, did you manage to create the examples that we will share with Ben and his team, like what we discussed yesterday?
+[Pavlo Negadailov]: Quirer examples.
+[Serhii Yalosovetsky]: Um, not the uh no, so I can do that today.
+[Pavlo Negadailov]: Please do it. Let's be prepared for the meeting.
+[Pavlo Negadailov]: Okay, so Lev joining our team, he will work on regulation traceability. Let's move anything else regarding VF search tool or we can move to regulation traceability tool.
+[Pavlo Negadailov]: Let's move to regulation traceability. Question number one, Kasam Moazam, did you run this 535 to understand is it working right now or not?
+[Mohammad Moazam]: Yeah, I ran it. Hassan also ran it yesterday, so he had four.
+[Mohammad Moazam]: Quite so unstable.
+[Pavlo Negadailov]: And how much time did it take? Did it take courses?
+[Mohammad Moazam]: I'm quoting that.
+[Pavlo Negadailov]: Yeah.
+[Pavlo Negadailov]: For me.
+[Mohammad Moazam]: I'm not sure. Mine?
+[Mohammad Moazam]: For Hassam, I think, uh, I don't know, I don't see the time. I don't remember the time on my one because it was running in background and I forgot to note the time.
+[Serhii Yalosovetsky]: On my side, I ran it twice. And so on this second time, I got five regulations. And for the first time, let me see here, because I took screenshots.
+[Serhii Yalosovetsky]: Uh, and I downloaded the result as well.
+[Serhii Yalosovetsky]: I think you're having four. Okay, so the first time I had four.
+[Mohammad Moazam]: I think there are 104. Okay, so it's a question.
+[Mohammad Moazam]: Second time, five.
+[Mohammad Moazam]: So five seems to be.
+[Mohammad Moazam]: Forever come.
+[Serhii Yalosovetsky]: And the difference was.
+[Serhii Yalosovetsky]: Uh...
+[Serhii Yalosovetsky]: The 131 is there, 13 H is there. So the 13 R is the difference.
+[Pavlo Negadailov]: Okay, so we assume it is right and it is working okay.
+[Serhii Yalosovetsky]: Yeah.
+[Serhii Yalosovetsky]: Because you know the 13 and the 13 H, you know how they're just for different vehicle types, but they're the same regulation.
+[Serhii Yalosovetsky]: So that was the only delta between the two runs.
+[Pavlo Negadailov]: Good, then.
+[Pavlo Negadailov]: Raf, what are your updates?
+[Mohammad Moazam]: Actually, I don't have any updates. I've checked that about the version of the Facade. Facade is using the actual version of the AfroGraph. It was the last changes were made by Caterina in Facade and in the library also. I don't know why it can be unstable. I don't see any significant changes because the last changes was according to Langfuse Fix. Yeah. Langfuse Fix integration. Integration fix.
+[Mohammad Moazam]: It is really strange. What about my task about the changes about groups? I'm still waiting the
+[Mohammad Moazam]: Muhammad to explain me what is the goal of it and what should I do.
+[Pavlo Negadailov]: Exactly.
+[Pavlo Negadailov]: Mohamed, can you think with love right after this? Now we'll discuss the next step.
+[Mohammad Moazam]: This is all over.
+[Pavlo Negadailov]: Yeah, well, so the first task will be to do the grouping. Sam will explain you what the grouping is. Okay.
+[Pavlo Negadailov]: Good. Another snows guys.
+[Pavlo Negadailov]: If not, then let's go back to work.
+[Pavlo Negadailov]: Okay, yeah.
+[Pavlo Negadailov]: And two.
+[Mohammad Moazam]: A lymph.
+[Mohammad Moazam]: Love, can you stay back?
+[Mohammad Moazam]: Okay. So the task is there are two tasks basically. One is to add a category to the regulation.
+[Mohammad Moazam]: We need to add metadata to that. And for example, if someone says I want this category, so only those categories of regulations should get passed, should we get analyzed by the regulation project? So it is a bit of it is for AI and a bit of it is on front end and back end.
+[Mohammad Moazam]: I'll explain both how to do that. And the other project is where you have where kind of the user selects.
+[Mohammad Moazam]: Certain regulations, like he has the option to
+[Mohammad Moazam]: select one, two or three or as many regulations as he wants, and he just runs on those regulations. That's all. So it's basically we select the regulations and we run it. And the other one is we basically select the category and we run it in both the operation, the AI operation is very similar, but there are different types to it. One is categorization, like where we add a category to regulations, and another one is where we select them manually.
+[Mohammad Moazam]: Okay, okay, I understand. And how should we divide the regulations by categories?
+[Mohammad Moazam]: So we will provide you the categorization.
+[Mohammad Moazam]: For that?
+[Mohammad Moazam]: I will ask you to connect with one person, and he can provide you that. I'm not sure what categorization would we will be there, but again, we will think about it.
+[Mohammad Moazam]: Okay.
+[Mohammad Moazam]: Okay, I can get it from where? From metadata or when the user is uploading it?
+[Mohammad Moazam]: Uploading it, yes, when the user is uploading, most likely, like that. So
+[Mohammad Moazam]: So, okay.
+[Mohammad Moazam]: And we need to also add a function feature to delete regulations.
+[Mohammad Moazam]: So, for example, you can add regulations, but right now we can't delete it. So we need to add a functionality to delete it.
+[Mohammad Moazam]: Okay, okay, so...
+[Mohammad Moazam]: And what is the purpose to delete it? They have requested it.
+[Mohammad Moazam]: And what is the problem?
+[Mohammad Moazam]: They have requests.
+[Mohammad Moazam]: Yeah, okay. Okay. That's the problem. I think the problem is because they won't they can't choose the specific regulations now, but when we will have the
+[Mohammad Moazam]: ability to choose the specific regulations for run.
+[Mohammad Moazam]: Anyways, like I would I would I would say it is easy to create a credit application like
+[Mohammad Moazam]: Yeah, it is easy to do that.
+[Mohammad Moazam]: We should be able to add categorization to a regulation. We should be able to edit categorization to it. And we should be able to delete it. I would say all these should be implemented.
+[Pavlo Negadailov]: I see.
+[Mohammad Moazam]: Um, so that's first part, and regarding the AI, uh, how we will do it on the AI level in the BFRAG part.
+[Mohammad Moazam]: We have to we
