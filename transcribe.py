@@ -87,6 +87,22 @@ def choose_device() -> str:
     )
 
 
+def release_canary_model() -> None:
+    import torch
+
+    if get_canary_model.cache_info().currsize == 0:
+        return
+    try:
+        model = get_canary_model()
+        get_canary_model.cache_clear()
+        del model
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        log.info("Canary model released from CUDA.")
+    except Exception as exc:
+        log.warning("Failed to release Canary model: %s", exc)
+
+
 @lru_cache(maxsize=1)
 def get_canary_model():
     from nemo.collections.asr.models import ASRModel

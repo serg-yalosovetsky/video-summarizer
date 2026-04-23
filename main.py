@@ -74,6 +74,7 @@ from helpers import (
     remove_repetitions,
     sse,
     tail_text,
+    unload_ollama_models,
 )
 from summary import (
     classify_is_meeting,
@@ -112,7 +113,7 @@ ARTIFACTS_DIR.mkdir(exist_ok=True)
 from transcribe import (
     WavConversionResult,
     convert_to_wav,
-    get_canary_model,
+    release_canary_model,
     run_diarization,
     transcribe_by_segments,
     transcribe_with_canary,
@@ -193,6 +194,12 @@ async def process_generator(
         build_quality_report=build_quality_report,
         filter_reliable_context=filter_reliable_context,
         substitute_speaker_names=substitute_speaker_names,
+        release_canary=release_canary_model,
+        unload_ollama=lambda: unload_ollama_models(
+            settings.ollama_model,
+            settings.ollama_clean_model,
+            settings.frame_model,
+        ),
     )
     async for event in process_generator_impl(file, chat_text, source_lang, deps=deps):
         yield event
@@ -216,12 +223,18 @@ async def lifespan(app):
         settings.frame_model,
     )
     log.info("Ollama ready — service accepting requests.")
-    log.info("Pre-loading Canary model at startup...")
-    await loop.run_in_executor(None, get_canary_model)
-    log.info("Canary model ready — service accepting requests.")
     if langfuse_is_enabled():
         log.info("Langfuse tracing enabled.")
     yield
+    log.info("Shutting down — releasing GPU resources...")
+    await loop.run_in_executor(None, release_canary_model)
+    await loop.run_in_executor(
+        None,
+        unload_ollama_models,
+        settings.ollama_model,
+        settings.ollama_clean_model,
+        settings.frame_model,
+    )
     await loop.run_in_executor(None, flush_langfuse)
 
 

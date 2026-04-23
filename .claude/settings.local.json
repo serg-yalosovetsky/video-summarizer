@@ -15,7 +15,9 @@
       "Bash(pip3 show *)",
       "Bash(.venv/bin/pytest tests/test_main_pipeline.py -x -q)",
       "Bash(.venv/bin/pytest tests/test_main_pipeline.py -q -k \"SpeakerFrame or analyze_speaker\")",
-      "Bash(.venv/bin/pytest tests/test_main_pipeline.py -v -k \"self_speaker\")"
+      "Bash(.venv/bin/pytest tests/test_main_pipeline.py -v -k \"self_speaker\")",
+      "Bash(python3 -c 'import ast, sys *)",
+      "Bash(python3 -c 'import ast *)"
     ]
   }
 }

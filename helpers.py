@@ -100,7 +100,7 @@ def _warm_ollama_model(model: str, *, timeout: float) -> None:
         "model": model,
         "prompt": "Reply with exactly one token: ok",
         "stream": False,
-        "keep_alive": "15m",
+        "keep_alive": "0",
         "options": {"num_predict": 1, "temperature": 0},
     }
     response = httpx.post(OLLAMA_URL, json=payload, timeout=timeout)
@@ -238,6 +238,17 @@ def ensure_ollama_ready(*models: str, timeout: float = 10.0) -> None:
                 "Fix the Ollama GPU setup or set OLLAMA_DEVICE=auto for debugging."
             )
         log.info("Ollama model %s verified on GPU (%s)", model, _ollama_runtime_summary(loaded_model))
+
+
+def unload_ollama_models(*models: str, timeout: float = 10.0) -> None:
+    unique_models = list(dict.fromkeys(m for m in models if m))
+    for model in unique_models:
+        try:
+            payload = {"model": model, "keep_alive": "0"}
+            httpx.post(OLLAMA_URL, json=payload, timeout=timeout)
+            log.info("Ollama model %s unloaded from VRAM.", model)
+        except Exception as exc:
+            log.warning("Failed to unload Ollama model %s: %s", model, exc)
 
 
 def combine_sources(transcript: str, chat: str) -> str:

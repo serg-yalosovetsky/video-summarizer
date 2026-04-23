@@ -53,7 +53,7 @@ _CAPTION_EXTRACTION_SCHEMA = CaptionExtraction.model_json_schema()
 _SPEAKER_APPEARANCE_SCHEMA = SpeakerAppearance.model_json_schema()
 _SPEAKER_PANEL_NAME_SCHEMA = SpeakerPanelName.model_json_schema()
 _OLLAMA_TIMEOUT_SECONDS = 300.0
-_OLLAMA_KEEP_ALIVE = "10m"
+_OLLAMA_KEEP_ALIVE = "5m"
 _MAX_FRAMES_PER_SPEAKER = 3
 _NO_INFO_PHRASES = {
     "no people",

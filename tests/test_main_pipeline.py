@@ -130,6 +130,7 @@ class ProcessGeneratorTests(unittest.IsolatedAsyncioTestCase):
             mock.patch.object(main, "settings", patched_settings),
             mock.patch.object(main, "notify_done", new=mock.AsyncMock()),
             mock.patch.object(main, "convert_to_wav", side_effect=fake_convert_to_wav),
+            mock.patch.object(main, "run_diarization", return_value=[]),
             mock.patch.object(main, "extract_frames", side_effect=fake_extract_frames),
             mock.patch.object(
                 main,
@@ -223,6 +224,7 @@ class ProcessGeneratorTests(unittest.IsolatedAsyncioTestCase):
             mock.patch.object(main, "settings", patched_settings),
             mock.patch.object(main, "notify_done", new=mock.AsyncMock()),
             mock.patch.object(main, "convert_to_wav", side_effect=fake_convert_to_wav),
+            mock.patch.object(main, "run_diarization", return_value=[]),
             mock.patch.object(main, "extract_frames", side_effect=fake_extract_frames),
             mock.patch.object(
                 main,

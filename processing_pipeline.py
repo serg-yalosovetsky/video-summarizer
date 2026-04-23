@@ -91,6 +91,8 @@ class PipelineDeps:
     build_quality_report: Callable[[dict], str]
     filter_reliable_context: Callable[[str, dict], str]
     substitute_speaker_names: Callable[[str, dict], str]
+    release_canary: Callable[[], None]
+    unload_ollama: Callable[[], None]
 
 
 async def _run_in_executor_traced(
@@ -979,9 +981,13 @@ async def process_generator(
                     yield event
                 async for event in _analyze_frames_step(state, loop=loop, deps=deps):
                     yield event
+                await loop.run_in_executor(None, deps.unload_ollama)
                 async for event in _sleep_between_stages(deps, "transcription"):
                     yield event
                 async for event in _transcribe_step(state, loop=loop, deps=deps):
+                    yield event
+                await loop.run_in_executor(None, deps.release_canary)
+                async for event in _sleep_between_stages(deps, "content cleaning"):
                     yield event
             else:
                 deps.log.info("► No video file - chat-only mode")
