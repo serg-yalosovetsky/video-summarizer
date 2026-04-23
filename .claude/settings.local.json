@@ -1,7 +1,8 @@
 {
   "permissions": {
     "allow": [
-      "Bash(cmd /c mkdir \"e:\\\\code\\\\video-summarizer\\\\static\")"
+      "Bash(cmd /c mkdir \"e:\\\\code\\\\video-summarizer\\\\static\")",
+      "Bash(python3 -c ' *)"
     ]
   }
 }

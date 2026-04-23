@@ -84,6 +84,7 @@ class PipelineDeps:
     evaluate_speaker_context: Callable[[str], dict]
     build_quality_report: Callable[[dict], str]
     filter_reliable_context: Callable[[str, dict], str]
+    substitute_speaker_names: Callable[[str, dict], str]
 
 
 async def _run_in_executor_traced(
@@ -558,6 +559,33 @@ async def _clean_content_step(
     )
 
 
+def _substitute_speaker_names_step(state: ProcessState, *, deps: PipelineDeps) -> str | None:
+    if not state.visual_context or not state.cleaned_text:
+        return None
+    eval_result = deps.evaluate_speaker_context(state.visual_context)
+    reliable = eval_result.get("reliable", [])
+    if not reliable:
+        return None
+    state.cleaned_text = deps.substitute_speaker_names(state.cleaned_text, eval_result)
+    if state.cleaned_artifact_path is not None:
+        deps.write_artifact(state.cleaned_artifact_path.name, state.cleaned_text)
+    deps.log.info(
+        "  [speaker-names] substituted %d reliable speakers: %s",
+        len(reliable),
+        ", ".join(reliable),
+    )
+    if state.cleaned_artifact_path is None:
+        return None
+    return deps.sse(
+        "cleaned_done",
+        {
+            "text": state.cleaned_text,
+            "download_url": f"/artifacts/{state.cleaned_artifact_path.name}",
+            "filename": state.cleaned_artifact_path.name,
+        },
+    )
+
+
 async def _classify_meeting_step(state: ProcessState, *, loop: asyncio.AbstractEventLoop, deps: PipelineDeps):
     try:
         state.is_meeting = await _run_in_executor_traced(
@@ -894,6 +922,9 @@ async def process_generator(
 
             async for event in _clean_content_step(state, loop=loop, root_span=root_span, deps=deps):
                 yield event
+            sse_event = _substitute_speaker_names_step(state, deps=deps)
+            if sse_event:
+                yield sse_event
             await _classify_meeting_step(state, loop=loop, deps=deps)
             async for event in _summary_and_tldr_step(state, loop=loop, root_span=root_span, deps=deps):
                 yield event

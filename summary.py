@@ -29,7 +29,7 @@ OLLAMA_FAST_OPTIONS = {
 }
 OLLAMA_CLASSIFIER_OPTIONS = {
     **OLLAMA_FAST_OPTIONS,
-    "num_predict": 8,
+    "num_predict": 256,
 }
 OLLAMA_SUMMARY_OPTIONS = {
     **OLLAMA_FAST_OPTIONS,
@@ -257,6 +257,22 @@ def filter_reliable_context(visual_context: str, eval_result: dict) -> str:
     return "\n".join(filtered)
 
 
+_SPEAKER_TAG_IN_TRANSCRIPT_RE = re.compile(r"\[SPEAKER_(\w+)\]")
+
+
+def substitute_speaker_names(text: str, eval_result: dict) -> str:
+    """Replace [SPEAKER_XX] tags with identified names for reliable speakers only."""
+    reliable: list[str] = eval_result.get("reliable", [])
+    speaker_names: dict[str, str | None] = eval_result.get("speaker_names", {})
+    if not reliable:
+        return text
+    for speaker_id in reliable:
+        name = speaker_names.get(speaker_id)
+        if name and not _is_no_context_name(name):
+            text = text.replace(f"[{speaker_id}]", f"[{name}]")
+    return text
+
+
 def local_preclean_content(text: str) -> str:
     normalized = text.replace("\r\n", "\n").replace("\r", "\n")
     normalized = normalized.replace("\t", " ")
@@ -372,7 +388,17 @@ def clean_content(transcript: str, visual_context: str = "") -> str:
     return normalized_transcript
 
 
+_SPEAKER_TAG_RE = re.compile(r"\[SPEAKER_\w+\]")
+
+
+def _has_multiple_speakers(text: str) -> bool:
+    speakers = set(_SPEAKER_TAG_RE.findall(text[:4000]))
+    return len(speakers) >= 2
+
+
 def classify_is_meeting(text: str) -> bool:
+    if _has_multiple_speakers(text):
+        return True
     prompt = MEETING_DETECTION_PROMPT.format(text=text[:2000])
     raw = call_ollama(
         prompt,

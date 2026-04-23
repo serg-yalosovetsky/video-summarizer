@@ -1,0 +1,129 @@
+=== Video/Audio Transcript ===
+[00:00:04] [SPEAKER_03]: No, no.
+[00:00:15] [SPEAKER_00]: Oh, love is here. Hi, guys. Hi, guys.
+[00:00:22] [SPEAKER_00]: Okay, let's start with.
+[00:00:26] [SPEAKER_00]: Uh. ..
+[00:00:28] [SPEAKER_00]: AI agentique tool and then go to regulation traceability. So again, let's start from your
+[00:00:55] [SPEAKER_00]: So he. ..
+[00:00:57] [SPEAKER_03]: Ah, yeah.
+[00:00:59] [SPEAKER_03]: Can you hear me? Okay, yeah, yeah, I hear you. I don't I don't hear you, Sergey, in your speech. Okay, I I read this repo and I split it into front ends and back ends.
+[00:01:17] [SPEAKER_03]: I remember you told me about something about that I should split it into three or four parts.
+[00:01:28] [SPEAKER_03]: But I currently can't find how I should split it further because it is really only packages with MCP servers and the content.
+[00:01:48] [SPEAKER_02]: Um. ..
+[00:01:50] [SPEAKER_02]: Front and back end MCP servers are
+[00:01:54] [SPEAKER_02]: And the rest of it is fourth, that is the AI part, like where we are connecting the deep agents library, the AI code, that's the fourth.
+[00:02:07] [SPEAKER_02]: So it is everything that is in packages.
+[00:02:12] [SPEAKER_02]: Everything is.
+[00:02:13] [SPEAKER_03]: It's in packages, it is MCP servers and. ..
+[00:02:18] [SPEAKER_03]: Yeah.
+[00:02:25] [SPEAKER_04]: Packages also contains the agentic back end. One of the packages you could say is the
+[00:02:42] [SPEAKER_03]: Sorry, sorry, I can't hear you clearly.
+[00:02:49] [SPEAKER_02]: So the code for the AI, the fourth part apart from MCP is in packages. You can see something like subagents, deep agents, UOC skills. Yeah. That should be a separate repository. That's basically the AI back end.
+[00:03:05] [SPEAKER_03]: In agent service, in published agent service.
+[00:03:12] [SPEAKER_03]: Okay, okay, yeah, I see. So it should be backend here and all other in-packages. It is MCP server.
+[00:03:25] [SPEAKER_03]: There are also common in Harbour.
+[00:03:30] [SPEAKER_04]: So harbour is the evaluation.
+[00:03:32] [SPEAKER_02]: framework.
+[00:03:35] [SPEAKER_02]: I would say keep it with the with the AI back end code.
+[00:03:41] [SPEAKER_03]: So Harbor keeps this backend code with agent service.
+[00:03:47] [SPEAKER_03]: Yes. And common it should be common in the back end and in the MCP.
+[00:03:54] [SPEAKER_02]: Yeah, so common again, like that, you need to see what it is linked with. If it is linked to the agent tech code, then it will remain there. If it is some part of it is used in the back end, you need to transfer certain personal portions to that repository. So you need to segment that.
+[00:04:12] [SPEAKER_03]: Okay, yep. But it is three servers. So it is front end, it is agent service in the packages and the rest MCP servers. So it is three repo.
+[00:04:27] [SPEAKER_02]: So, okay, so there we need back end needs to be divided into AI part and then the web application part. So we will separate the middleware.
+[00:04:40] [SPEAKER_02]: have fast API router or something like that. It needs to be a separate repository. I think that layer will handle in future authentication, other services. The AI code will be separate.
+[00:04:55] [SPEAKER_03]: Yeah. Makes sense? Yeah. Okay. Yeah. Okay. Okay. Yeah. I will do it.
+[00:05:03] [SPEAKER_02]: You need to wrap the AI code into a Python module, a Python package that can be installed in the middleware as a dependency similar to Regulation Project. I'm not sure if you have seen that. We'll follow a similar kind of architecture there.
+[00:05:21] [SPEAKER_04]: Okay.
+[00:05:28] [SPEAKER_04]: Is similar to what project?
+[00:05:39] [SPEAKER_02]: Regulation project in the AI code and how the middle middleware acts like the web back end and then the front end. You can get some inspiration from that. You can also you can discuss with Lib.
+[00:05:52] [SPEAKER_03]: Okay, regulation project is in the repository.
+[00:06:00] [SPEAKER_03]: Regulation Project.
+[00:06:09] [SPEAKER_00]: Are we using NCP servers for a glacier project only for this?
+[00:06:21] [SPEAKER_03]: VF regulation facade and VF regulation proto.
+[00:06:31] [SPEAKER_03]: Five.
+[00:06:36] [SPEAKER_03]: Also, there is some problem with splitting the code because when this was MonoRepo, so tests can test how backends.
+[00:06:51] [SPEAKER_03]: communicate with front end how it all works and we can run e to e tests but it is not possible that simple with splitting repo.
+[00:07:07] [SPEAKER_02]: Yeah, that makes sense. Of course, that will not be the same.
+[00:07:16] [SPEAKER_02]: I would say in that case, let's not focus on that at this point.
+[00:07:21] [SPEAKER_03]: Okay, okay.
+[00:07:27] [SPEAKER_03]: Is it correctly that it should also build Docker images for all of this?
+[00:07:38] [SPEAKER_02]: For most of them, yes. For AI backend, you can copy. We basically store the Python package in an article.
+[00:07:50] [SPEAKER_02]: factor repository. So we can use the same. So again, I would say refer to the regulation project and you can basically just use the same methodology in this project as well.
+[00:08:03] [SPEAKER_03]: Okay, so for all of these except AI core, I should build Docker image, but for AI core, I should build Python package.
+[00:08:19] [SPEAKER_03]: Okay, okay.
+[00:08:29] [SPEAKER_00]: Pressam, regarding this project, did you manage to create the examples that we will share with Ben and his team, like what we discussed yesterday?
+[00:08:41] [SPEAKER_00]: Quirer examples.
+[00:08:44] [SPEAKER_04]: um not the uh no so i can do that today
+[00:08:53] [SPEAKER_00]: Please do it. Let's be prepared for the meeting.
+[00:08:57] [SPEAKER_00]: Okay, so Lev joining our team, he will work on regulation traceability. Let's move anything else regarding VF search tool or we can move to regulation traceability tool.
+[00:09:14] [SPEAKER_00]: Let's move to regulation traceability. Question number one, Kasam Mosam, did you run this 535 to understand is it working right now or not?
+[00:09:27] [SPEAKER_02]: Yeah, I ran it. Hassan also ran it yesterday, so he had four.
+[00:09:35] [SPEAKER_02]: Quite so unstable.
+[00:09:37] [SPEAKER_00]: And how much time did it take? Did it take courses?
+[00:09:44] [SPEAKER_00]: Yeah.
+[00:09:47] [SPEAKER_00]: For me.
+[00:09:49] [SPEAKER_02]: I'm not sure. Mine for Hassam, I think. I don't know. I don't see the time. I don't remember the time on my one because it was running in background and I forgot to note the time.
+[00:10:03] [SPEAKER_04]: On my side, I ran it twice. And so on this second time, I got five regulations. And for the first time, let me see here, because I took screenshots.
+[00:10:23] [SPEAKER_04]: Uh, and I downloaded the result as well.
+[00:10:31] [SPEAKER_04]: I think you're having four. Okay, so the first time I had four.
+[00:10:35] [SPEAKER_02]: Second time, half bye.
+[00:10:39] [SPEAKER_02]: So five seems to be.
+[00:10:42] [SPEAKER_02]: Forever come.
+[00:10:46] [SPEAKER_04]: And the difference was.
+[00:10:51] [SPEAKER_04]: Uh. ..
+[00:10:55] [SPEAKER_04]: The 131 is there, 13 H is there. So the 13 R is the difference.
+[00:11:09] [SPEAKER_00]: Okay, so we assume it is right and it is working okay.
+[00:11:13] [SPEAKER_04]: Yeah.
+[00:11:15] [SPEAKER_04]: Because you know the 13 and the 13 H, you know how they're just for different vehicle types, but they're the same regulation.
+[00:11:30] [SPEAKER_04]: So that was the only delta between the two runs.
+[00:11:40] [SPEAKER_00]: Good, then.
+[00:11:44] [SPEAKER_00]: Raf, what are your updates?
+[00:11:48] [SPEAKER_01]: Actually, I don't have any updates. I've checked that about the version of the Facade. Facade is using the actual version of VFRG. It was the last changes.
+[00:12:04] [SPEAKER_01]: were made by Katarina in Facade and in the library also. I don't know why it can be unstable.
+[00:12:19] [SPEAKER_01]: I don't see any significant changes because the last changes was according to Langfuse Fix, yeah, Langfuse Fix integration, integration fix.
+[00:12:36] [SPEAKER_01]: It is really strange. What about my task about the changes about groups? I'm still waiting the
+[00:12:45] [SPEAKER_01]: Muhammad to explain me what is the goal of it and what should I do.
+[00:12:54] [SPEAKER_00]: Mohammad, can you sync with Lev right after? Yeah. We'll discuss the next step.
+[00:13:05] [SPEAKER_00]: Yeah, well, so the first task will be to do the grouping. Sam will explain you what the grouping is. Okay.
+[00:13:15] [SPEAKER_00]: Anything else, guys?
+[00:13:21] [SPEAKER_00]: If not, then let's go back to work.
+[00:13:25] [SPEAKER_03]: Okay, yeah.
+[00:13:27] [SPEAKER_00]: And two.
+[00:13:29] [SPEAKER_02]: A lymph.
+[00:13:33] [SPEAKER_02]: Love, can you stay back?
+[00:13:38] [SPEAKER_01]: Yeah, yeah, I'm here.
+[00:13:38] [SPEAKER_02]: Okay. So the task is there are two tasks basically. One is to add a category to the regulation.
+[00:13:52] [SPEAKER_02]: We need to add metadata to that. And for example, if someone says I want this category, so only those categories of regulations should get passed.
+[00:14:03] [SPEAKER_02]: Should we get analyzed by the regulation project? So it is a bit of it is for AI and a bit of it is on front end and back end.
+[00:14:15] [SPEAKER_02]: I'll explain both how to do that. And the other project is where you have where kind of the user selects.
+[00:14:25] [SPEAKER_02]: Certain regulations, like he has the option to.
+[00:14:28] [SPEAKER_02]: Select one, two or three or as many regulations as he wants and he just runs on those regulations. That's all. So it's basically we select the regulations and we run it. And the other one is we basically select the category and we run it.
+[00:14:43] [SPEAKER_02]: In both, the AI operation is very similar, but there are different types to it. One is categorization, like where we add a category to regulations, and another is where we select them manually.
+[00:15:00] [SPEAKER_01]: Okay, okay, I understand. And how should we divide the regulations by categories?
+[00:15:07] [SPEAKER_02]: So we will provide you the categorization.
+[00:15:09] [SPEAKER_01]: For that?
+[00:15:10] [SPEAKER_02]: I will ask you to connect with one person and he can provide you that. I'm not sure what categorization would we will be there, but again, we will think about it.
+[00:15:22] [SPEAKER_01]: Okay, I can get it from where? From metadata or when the user is uploading it.
+[00:15:28] [SPEAKER_02]: when the user is uploading most likely like that so
+[00:15:32] [SPEAKER_01]: Okay.
+[00:15:33] [SPEAKER_02]: And we need to also add a function feature to delete regulations.
+[00:15:39] [SPEAKER_02]: So, for example, you can add regulations, but right now we can't delete it. So we need to add a functionality to delete it.
+[00:15:47] [SPEAKER_01]: Okay, okay, so. ..
+[00:15:50] [SPEAKER_01]: What is the purpose to delete it? They have requested it. Yeah, okay. Okay. That's the problem. I think the problem is because they will.
+[00:16:01] [SPEAKER_01]: They can't choose the specific regulations now, but when we will have the ability to choose the specific regulations for one.
+[00:16:12] [SPEAKER_02]: Anyways, like I would I would say it's easy to create a great application. Like we should be able to add categorization to a regulation. We should be able to edit categorization to it. And we should be able to delete it. I'd say all these.
+[00:16:29] [SPEAKER_02]: should be implemented. So that's the first part. And regarding the AI, how we will do it on the AI level in the BF drag part, we have to we basically need to add it as a filter to the quadrant.
+[00:16:49] [SPEAKER_02]: Yes, I understand. So that is the layer we need to handle it for. So I would ask you and for both of the tasks, you are working on the AI part as well as the front end and back end part. So what I would suggest is you start with the AI part.
+[00:17:04] [SPEAKER_02]: Work it through and then create a pull request once you're finished with that and me as a reviewer, I will review your code once that is we test it, we make sure that the AI part is done, we'll merge it and then you will work on the front end and back end.
+[00:17:20] [SPEAKER_01]: What do you mean, AI part, like a part in the VFRA-GRUG project? Because as I understand, I can do it inside of Facade, the filtering.
+[00:17:31] [SPEAKER_02]: No, no, no, you can't do it. You have to do it on the VFRAG part because you need to like the VFRAG controls which regulations to pass through.
+[00:17:47] [SPEAKER_01]: So we have Yeah, but I can set it because the the full process of getting the regulations from QDERANT, I am like, it is settled up on the facades side.
+[00:18:01] [SPEAKER_01]: Like I'm, as I remember, I'm getting the regulations, the collection of regulations from the quadrant and put it and start the run with it so I can filter on the facade. You are many.
+[00:18:14] [SPEAKER_02]: are doing the retrieval. I'm not sure. Is it just because okay. So there are two stages. One is where you show it on the UI. That doesn't that's not the filtering part. There is another process that is going in via frag when we are doing the analysis.
+[00:18:29] [SPEAKER_02]: So for that, we need to add a filter there. So what I would ask you to do, review the VFRI package, understand that code and then.
+[00:18:43] [SPEAKER_02]: If you have any questions on how to implement that filter, ask me and then we can proceed because right now I think you don't have a very good understanding of how that filter would be assigned. So I would ask you to review that. Okay, I will check it.
+[00:18:59] [SPEAKER_01]: So there is three parts, like a or two parts, three parts. So just keep filtering more categorizations.
+[00:19:09] [SPEAKER_02]: Create a ticket, create a ticket, put all of the information there. If I see that some of it is missing, I will add it there.
+[00:19:16] [SPEAKER_01]: Okay, okay.
+[00:19:18] [SPEAKER_01]: Is it clear? Okay. I will return to you with update. Okay. Okay. Okay. Thank you. See you. Thanks. Bye.
+[00:19:28] [SPEAKER_03]: Thank you. Bye.

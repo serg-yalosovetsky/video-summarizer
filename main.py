@@ -82,6 +82,7 @@ from summary import (
     evaluate_speaker_context,
     build_quality_report,
     filter_reliable_context,
+    substitute_speaker_names,
     generate_personal_todo,
     generate_short_summary,
     generate_summary,
@@ -191,6 +192,7 @@ async def process_generator(
         evaluate_speaker_context=evaluate_speaker_context,
         build_quality_report=build_quality_report,
         filter_reliable_context=filter_reliable_context,
+        substitute_speaker_names=substitute_speaker_names,
     )
     async for event in process_generator_impl(file, chat_text, source_lang, deps=deps):
         yield event
