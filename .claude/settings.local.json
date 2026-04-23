@@ -7,7 +7,15 @@
       "Bash(systemctl show *)",
       "Read(//etc/systemd/system/**)",
       "Read(//home/syalosovetskyi/.config/systemd/**)",
-      "Read(//etc/systemd/**)"
+      "Read(//etc/systemd/**)",
+      "Bash(python -m pytest tests/test_main_pipeline.py -x -q)",
+      "Bash(python3 -m pytest tests/test_main_pipeline.py -x -q)",
+      "Read(//home/syalosovetskyi/**)",
+      "Read(//usr/**)",
+      "Bash(pip3 show *)",
+      "Bash(.venv/bin/pytest tests/test_main_pipeline.py -x -q)",
+      "Bash(.venv/bin/pytest tests/test_main_pipeline.py -q -k \"SpeakerFrame or analyze_speaker\")",
+      "Bash(.venv/bin/pytest tests/test_main_pipeline.py -v -k \"self_speaker\")"
     ]
   }
 }

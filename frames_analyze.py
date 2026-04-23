@@ -483,6 +483,8 @@ def _normalise_caption_name(value: str | None) -> str | None:
 
 
 def _candidate_rank(candidate: SpeakerFrameResult) -> int:
+    if candidate.no_active_speaker and _clean_name(candidate.caption_name) is not None:
+        return 3  # Teams self-speaker: no border + caption = highest confidence
     if _clean_name(candidate.active_panel_name) is not None:
         return 2
     if _clean_name(candidate.caption_name) is not None:
@@ -648,6 +650,7 @@ def _build_speaker_frame_result(
         return SpeakerFrameResult(
             person_visible=True,
             caption_name=caption_name,
+            no_active_speaker=True,
         )
 
     if active_speaker.has_active_speaker and position:
@@ -796,7 +799,14 @@ def _select_speaker_frame(
             log.info("  [frames] no person visible for %s @ %ds, trying next", speaker_id, ts)
             continue
 
-        if rank == 2:
+        if rank == 3:
+            log.info(
+                "  [frames] found self-speaker (no border + caption) for %s @ %ds: %s",
+                speaker_id,
+                ts,
+                candidate.caption_name,
+            )
+        elif rank == 2:
             log.info(
                 "  [frames] found active panel name for %s @ %ds: %s",
                 speaker_id,

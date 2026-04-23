@@ -881,6 +881,64 @@ class AnalyzeSpeakerFramesTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("appearance:", result)
 
 
+    async def test_analyze_speaker_frames_self_speaker_beats_active_border(self):
+        """Teams self-speaker pattern (no border + caption) should rank above active-border."""
+        queue = asyncio.Queue()
+        loop = asyncio.get_running_loop()
+        # Two segments for same speaker: first has active border (LEV HIRNYI),
+        # second has no border but caption shows SERHII Y (self-speaker pattern).
+        diarization_segments = [
+            (0.0, 10.0, "SPEAKER_00"),
+            (20.0, 30.0, "SPEAKER_00"),
+        ]
+        responses = [
+            # Segment 1 frame: active border visible → active_panel_name="LEV HIRNYI" (rank 2)
+            self._active(True, "middle-left"),
+            self._caption(True, "LEV HIRNYI"),
+            self._appearance("person in dark jacket"),
+            self._panel_name("LEV HIRNYI"),
+            # Segment 2 frame: no active border, caption shows SERHII Y (rank 3)
+            self._active(False, None),
+            self._caption(True, "SERHII Y"),
+        ]
+
+        def fake_extract_single_frame(input_path: str, out_path: str, ts: int) -> bool:
+            Path(out_path).write_bytes(b"frame")
+            return True
+
+        with tempfile.TemporaryDirectory() as tmp_dir:
+            with (
+                mock.patch.object(
+                    frames_analyze,
+                    "extract_single_frame",
+                    side_effect=fake_extract_single_frame,
+                ),
+                mock.patch.object(
+                    frames_analyze,
+                    "start_observation",
+                    side_effect=lambda *args, **kwargs: contextlib.nullcontext(None),
+                ),
+            ):
+                with mock.patch.object(
+                    frames_analyze,
+                    "_ollama_vision_post",
+                    side_effect=responses,
+                ):
+                    result = frames_analyze.analyze_speaker_frames(
+                        "video.mp4",
+                        tmp_dir,
+                        diarization_segments,
+                        queue,
+                        loop,
+                    )
+
+        await asyncio.sleep(0)
+
+        self.assertIn("name: SERHII Y", result)
+        self.assertIn("name_source: caption_self", result)
+        self.assertNotIn("name: LEV HIRNYI", result)
+
+
 class SpeakerFrameResultTests(unittest.TestCase):
     def test_to_context_str_prefers_active_panel_name_over_caption_name(self):
         result = models.SpeakerFrameResult(

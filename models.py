@@ -63,6 +63,10 @@ class SpeakerFrameResult(BaseModel):
     )
     appearance: str = Field(default="", description="Brief appearance description: gender, clothing, hair colour")
     position: str = Field(default="", description="Grid position of the speaker's panel in the frame. One of: top-left, top-center, top-right, middle-left, middle-center, middle-right, bottom-left, bottom-center, bottom-right")
+    no_active_speaker: bool = Field(
+        default=False,
+        description="True when caption name was found but no active border was visible (Teams self-speaker pattern)",
+    )
 
     def preferred_name(self) -> str | None:
         return self.active_panel_name or self.caption_name
@@ -70,6 +74,8 @@ class SpeakerFrameResult(BaseModel):
     def preferred_name_source(self) -> str:
         if self.active_panel_name:
             return "active_border"
+        if self.caption_name and self.no_active_speaker:
+            return "caption_self"
         if self.caption_name:
             return "caption"
         return ""
