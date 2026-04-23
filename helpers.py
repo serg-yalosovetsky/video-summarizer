@@ -4,12 +4,15 @@ import json
 import logging
 import os
 import re
+import warnings
 from functools import lru_cache
 
 import httpx
 
 from config import settings
 from tracing import start_observation
+
+warnings.filterwarnings("ignore", message="TensorFloat-32", module=r"pyannote\.audio")
 
 logging.basicConfig(
     level=logging.INFO,
@@ -22,14 +25,18 @@ _BENIGN_NEMO_CLASSLOAD_FRAGMENT = (
     "Error getting class at nemo.collections.asr.modules.transformer.get_nemo_transformer"
 )
 _BENIGN_NEMO_CLASSLOAD_DETAIL = "Located non-class of type 'function'"
+_BENIGN_PYANNOTE_TF32_FRAGMENT = "TensorFloat-32 (TF32) has been disabled"
 
 
 def is_benign_nemo_transformer_log(message: str | None) -> bool:
     if not message:
         return False
     return (
-        _BENIGN_NEMO_CLASSLOAD_FRAGMENT in message
-        and _BENIGN_NEMO_CLASSLOAD_DETAIL in message
+        (
+            _BENIGN_NEMO_CLASSLOAD_FRAGMENT in message
+            and _BENIGN_NEMO_CLASSLOAD_DETAIL in message
+        )
+        or _BENIGN_PYANNOTE_TF32_FRAGMENT in message
     )
 
 

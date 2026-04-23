@@ -4,6 +4,8 @@ import asyncio
 import base64
 import subprocess
 import time
+from collections import defaultdict
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import httpx
@@ -23,6 +25,20 @@ OLLAMA_URL = settings.ollama_url
 FRAME_MODEL = settings.frame_model
 FRAME_TIMESTAMPS = list(settings.frame_timestamps)
 MAX_FRAMES = settings.max_frames
+
+
+def _prompt_preview(prompt: str, limit: int = 180) -> str:
+    compact = " ".join(prompt.split())
+    if len(compact) <= limit:
+        return compact
+    return compact[: limit - 3].rstrip() + "..."
+
+
+def _schema_summary(schema: dict) -> str:
+    properties = schema.get("properties")
+    if not isinstance(properties, dict) or not properties:
+        return "<none>"
+    return ",".join(sorted(properties))
 
 
 def extract_single_frame(input_path: str, out_path: str, ts: int) -> bool:
@@ -114,6 +130,11 @@ def is_context_sufficient(context: str) -> bool:
 
 def _ollama_vision_post(prompt: str, system: str, b64_image: str, schema: dict) -> str:
     """POST to Ollama vision endpoint with structured output; returns raw response string."""
+    timeout_seconds = 300.0
+    started_at = time.monotonic()
+    schema_summary = _schema_summary(schema)
+    prompt_preview = _prompt_preview(prompt)
+    approx_image_bytes = (len(b64_image) * 3) // 4
     try:
         response = httpx.post(
             OLLAMA_URL,
@@ -124,20 +145,50 @@ def _ollama_vision_post(prompt: str, system: str, b64_image: str, schema: dict) 
                 "images": [b64_image],
                 "stream": False,
                 "format": schema,
+                "keep_alive": "10m",
             },
-            timeout=120.0,
+            timeout=timeout_seconds,
         )
     except httpx.TimeoutException as exc:
-        log.warning("  [frames] ← TIMEOUT after 120s  url=%s  model=%s  exc=%s",
-                    OLLAMA_URL, FRAME_MODEL, exc)
+        elapsed = time.monotonic() - started_at
+        log.warning(
+            "  [frames] ← TIMEOUT after %.2fs  url=%s  model=%s  prompt_chars=%d  image_bytes~=%d  schema=%s  exc_type=%s  exc=%s",
+            elapsed,
+            OLLAMA_URL,
+            FRAME_MODEL,
+            len(prompt),
+            approx_image_bytes,
+            schema_summary,
+            type(exc).__name__,
+            exc,
+        )
+        log.warning("  [frames] ← prompt preview: %s", prompt_preview)
         raise
     except httpx.ConnectError as exc:
-        log.warning("  [frames] ← CONNECT ERROR  url=%s  exc=%s", OLLAMA_URL, exc)
+        log.warning(
+            "  [frames] ← CONNECT ERROR  url=%s  model=%s  prompt_chars=%d  image_bytes~=%d  schema=%s  exc_type=%s  exc=%s",
+            OLLAMA_URL,
+            FRAME_MODEL,
+            len(prompt),
+            approx_image_bytes,
+            schema_summary,
+            type(exc).__name__,
+            exc,
+        )
+        log.warning("  [frames] ← prompt preview: %s", prompt_preview)
         raise
     log.info("  [frames] ← HTTP %d  (%.2fs)", response.status_code,
              response.elapsed.total_seconds())
     if not response.is_success:
         log.warning("  [frames] ← error body: %s", response.text[:500])
+        log.warning(
+            "  [frames] ← failed request meta  model=%s  prompt_chars=%d  image_bytes~=%d  schema=%s  prompt=%s",
+            FRAME_MODEL,
+            len(prompt),
+            approx_image_bytes,
+            schema_summary,
+            prompt_preview,
+        )
     response.raise_for_status()
     return response.json()["response"]
 
@@ -192,6 +243,15 @@ _NO_NAME_MARKERS = (
     "not identified",
 )
 _MAX_FRAMES_PER_SPEAKER = 3
+_SPEAKER_FRAME_SCHEMA = SpeakerFrameResult.model_json_schema()
+
+
+@dataclass
+class _SpeakerFrameSelection:
+    result: SpeakerFrameResult | None = None
+    timestamp: int | None = None
+    attempted_timestamps: list[int] = field(default_factory=list)
+    failed_attempts: list[str] = field(default_factory=list)
 
 
 def _is_no_name(name: str | None) -> bool:
@@ -205,6 +265,175 @@ def _has_name(candidate: "SpeakerFrameResult") -> bool:
     return not _is_no_name(candidate.caption_name) or not _is_no_name(candidate.active_panel_name)
 
 
+def _group_segments_by_speaker(
+    diarization_segments: list[tuple[float, float, str]],
+) -> dict[str, list[tuple[float, float]]]:
+    speaker_segments: dict[str, list[tuple[float, float]]] = defaultdict(list)
+    for start, end, speaker_id in diarization_segments:
+        speaker_segments[speaker_id].append((start, end))
+    for segments in speaker_segments.values():
+        segments.sort(key=lambda segment: segment[1] - segment[0], reverse=True)
+    return speaker_segments
+
+
+def _speaker_frame_timestamp(start: float, end: float) -> int:
+    return int((start + end) / 2)
+
+
+def _speaker_frame_path(tmp_dir: str, speaker_id: str, ts: int) -> Path:
+    return Path(tmp_dir) / f"frame_spk_{speaker_id}_{ts}s.jpg"
+
+
+def _notify_progress(
+    async_q: asyncio.Queue,
+    loop: asyncio.AbstractEventLoop,
+    current: int,
+    total: int,
+) -> None:
+    loop.call_soon_threadsafe(
+        async_q.put_nowait,
+        {"current": current, "total": total},
+    )
+
+
+def _analyze_speaker_frame_candidate(
+    input_path: str,
+    tmp_dir: str,
+    speaker_id: str,
+    ts: int,
+) -> tuple[SpeakerFrameResult | None, str | None]:
+    out_path = _speaker_frame_path(tmp_dir, speaker_id, ts)
+    if not extract_single_frame(input_path, str(out_path), ts):
+        log.warning(
+            "  [frames] failed to extract speaker frame  speaker=%s  ts=%ds  image_path=%s",
+            speaker_id,
+            ts,
+            out_path,
+        )
+        return None, f"{ts}s:extract_frame_failed"
+
+    prompt = SPEAKER_FRAME_PROMPT_TEMPLATE.format(speaker_id=speaker_id, ts=ts)
+    prompt_preview = _prompt_preview(prompt)
+    img_size = out_path.stat().st_size
+    log.info(
+        "  [frames] → speaker POST  speaker=%s  ts=%ds  image=%s  size=%dKB  model=%s",
+        speaker_id,
+        ts,
+        out_path.name,
+        max(1, img_size // 1024),
+        FRAME_MODEL,
+    )
+    with out_path.open("rb") as file_handle:
+        b64 = base64.b64encode(file_handle.read()).decode()
+
+    try:
+        with start_observation(
+            "ollama.speaker-frame-analysis",
+            as_type="generation",
+            model=FRAME_MODEL,
+            input={
+                "prompt": prompt,
+                "system": SPEAKER_FRAME_SYSTEM,
+                "schema": _SPEAKER_FRAME_SCHEMA,
+            },
+            metadata={
+                "provider": "ollama",
+                "speaker_id": speaker_id,
+                "timestamp_sec": ts,
+                "image_name": out_path.name,
+            },
+        ) as generation:
+            raw = _ollama_vision_post(
+                prompt,
+                SPEAKER_FRAME_SYSTEM,
+                b64,
+                _SPEAKER_FRAME_SCHEMA,
+            )
+            candidate = SpeakerFrameResult.model_validate_json(raw)
+            if generation is not None:
+                generation.update(
+                    output={
+                        "person_visible": candidate.person_visible,
+                        "caption_name": candidate.caption_name,
+                        "active_panel_name": candidate.active_panel_name,
+                        "appearance": candidate.appearance,
+                        "position": candidate.position,
+                    }
+                )
+    except Exception as exc:
+        log.warning(
+            "  [frames] speaker frame error  speaker=%s  ts=%ds  image=%s  image_path=%s  size=%dKB  prompt_chars=%d  exc_type=%s  exc=%s",
+            speaker_id,
+            ts,
+            out_path.name,
+            out_path,
+            max(1, img_size // 1024),
+            len(prompt),
+            type(exc).__name__,
+            exc,
+        )
+        log.warning(
+            "  [frames] speaker frame prompt  speaker=%s  ts=%ds  prompt=%s",
+            speaker_id,
+            ts,
+            prompt_preview,
+        )
+        return None, f"{ts}s:{type(exc).__name__}"
+
+    return candidate, None
+
+
+def _select_speaker_frame(
+    input_path: str,
+    tmp_dir: str,
+    speaker_id: str,
+    segments: list[tuple[float, float]],
+) -> _SpeakerFrameSelection:
+    selection = _SpeakerFrameSelection()
+    fallback_result: SpeakerFrameResult | None = None
+    fallback_ts: int | None = None
+
+    for start, end in segments[:_MAX_FRAMES_PER_SPEAKER]:
+        ts = _speaker_frame_timestamp(start, end)
+        selection.attempted_timestamps.append(ts)
+
+        candidate, failure = _analyze_speaker_frame_candidate(
+            input_path=input_path,
+            tmp_dir=tmp_dir,
+            speaker_id=speaker_id,
+            ts=ts,
+        )
+        if failure is not None:
+            selection.failed_attempts.append(failure)
+            continue
+        if candidate is None:
+            continue
+
+        if not candidate.person_visible:
+            log.info("  [frames] no person visible for %s @ %ds, trying next", speaker_id, ts)
+            continue
+
+        if _has_name(candidate):
+            name_found = candidate.caption_name or candidate.active_panel_name
+            log.info("  [frames] found name for %s @ %ds: %s", speaker_id, ts, name_found)
+            selection.result = candidate
+            selection.timestamp = ts
+            return selection
+
+        if fallback_result is None:
+            fallback_result = candidate
+            fallback_ts = ts
+            log.info(
+                "  [frames] person visible but no name for %s @ %ds, trying next",
+                speaker_id,
+                ts,
+            )
+
+    selection.result = fallback_result
+    selection.timestamp = fallback_ts
+    return selection
+
+
 def analyze_speaker_frames(
     input_path: str,
     tmp_dir: str,
@@ -215,94 +444,39 @@ def analyze_speaker_frames(
     total_hint: int | None = None,
 ) -> str:
     """Extract and analyze frames per speaker; prefers frames where a name is visible."""
-    from collections import defaultdict
-    speaker_segs: dict[str, list[tuple[float, float]]] = defaultdict(list)
-    for start, end, spk in diarization_segments:
-        speaker_segs[spk].append((start, end))
-    for spk in speaker_segs:
-        speaker_segs[spk].sort(key=lambda s: s[1] - s[0], reverse=True)
+    speaker_segs = _group_segments_by_speaker(diarization_segments)
 
-    results = []
+    results: list[str] = []
     total = total_hint or (start_index + len(speaker_segs))
     for idx, spk in enumerate(sorted(speaker_segs), start=1):
-        loop.call_soon_threadsafe(
-            async_q.put_nowait,
-            {"current": start_index + idx, "total": total},
+        _notify_progress(async_q, loop, start_index + idx, total)
+        selection = _select_speaker_frame(
+            input_path=input_path,
+            tmp_dir=tmp_dir,
+            speaker_id=spk,
+            segments=speaker_segs[spk],
         )
-        best_with_name: SpeakerFrameResult | None = None
-        best_ts_with_name: int | None = None
-        best_without_name: SpeakerFrameResult | None = None
-        best_ts_without_name: int | None = None
 
-        for start, end in speaker_segs[spk][:_MAX_FRAMES_PER_SPEAKER]:
-            ts = int((start + end) / 2)
-            out_path = str(Path(tmp_dir) / f"frame_spk_{spk}_{ts}s.jpg")
-            if not extract_single_frame(input_path, out_path, ts):
-                continue
-            prompt = SPEAKER_FRAME_PROMPT_TEMPLATE.format(speaker_id=spk, ts=ts)
-            with open(out_path, "rb") as fh:
-                b64 = base64.b64encode(fh.read()).decode()
-            try:
-                with start_observation(
-                    "ollama.speaker-frame-analysis",
-                    as_type="generation",
-                    model=FRAME_MODEL,
-                    input={
-                        "prompt": prompt,
-                        "system": SPEAKER_FRAME_SYSTEM,
-                        "schema": SpeakerFrameResult.model_json_schema(),
-                    },
-                    metadata={
-                        "provider": "ollama",
-                        "speaker_id": spk,
-                        "timestamp_sec": ts,
-                        "image_name": Path(out_path).name,
-                    },
-                ) as generation:
-                    raw = _ollama_vision_post(
-                        prompt,
-                        SPEAKER_FRAME_SYSTEM,
-                        b64,
-                        SpeakerFrameResult.model_json_schema(),
-                    )
-                    candidate = SpeakerFrameResult.model_validate_json(raw)
-                    if generation is not None:
-                        generation.update(
-                            output={
-                                "person_visible": candidate.person_visible,
-                                "caption_name": candidate.caption_name,
-                                "active_panel_name": candidate.active_panel_name,
-                                "appearance": candidate.appearance,
-                                "position": candidate.position,
-                            }
-                        )
-            except Exception as exc:
-                log.warning("  [frames] speaker frame error for %s @ %ds: %s", spk, ts, exc)
-                continue
-
-            if candidate.person_visible:
-                if _has_name(candidate):
-                    best_with_name = candidate
-                    best_ts_with_name = ts
-                    name_found = candidate.caption_name or candidate.active_panel_name
-                    log.info("  [frames] found name for %s @ %ds: %s", spk, ts, name_found)
-                    break
-                if best_without_name is None:
-                    best_without_name = candidate
-                    best_ts_without_name = ts
-                    log.info("  [frames] person visible but no name for %s @ %ds, trying next", spk, ts)
-            else:
-                log.info("  [frames] no person visible for %s @ %ds, trying next", spk, ts)
-
-        result = best_with_name or best_without_name
-        used_ts = best_ts_with_name or best_ts_without_name
-
-        if result and used_ts is not None:
-            results.append(result.to_context_str(spk, used_ts))
-            name_status = result.caption_name or result.active_panel_name or "no name"
-            log.info("  [frames] speaker %s @ %ds → %s", spk, used_ts, name_status)
+        if selection.result is not None and selection.timestamp is not None:
+            results.append(selection.result.to_context_str(spk, selection.timestamp))
+            name_status = (
+                selection.result.caption_name
+                or selection.result.active_panel_name
+                or "no name"
+            )
+            log.info(
+                "  [frames] speaker %s @ %ds → %s",
+                spk,
+                selection.timestamp,
+                name_status,
+            )
         else:
-            log.warning("  [frames] no usable frame found for %s", spk)
+            log.warning(
+                "  [frames] no usable frame found for %s  attempted=%s  failures=%s",
+                spk,
+                selection.attempted_timestamps or ["<none>"],
+                selection.failed_attempts or ["<none>"],
+            )
 
     loop.call_soon_threadsafe(async_q.put_nowait, None)
     return "\n".join(results)

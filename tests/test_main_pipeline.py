@@ -1,8 +1,10 @@
 import asyncio
+import contextlib
 import importlib
 import io
 import json
 import sys
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -22,6 +24,8 @@ main = importlib.import_module("main")
 transcribe = importlib.import_module("transcribe")
 helpers = importlib.import_module("helpers")
 summary = importlib.import_module("summary")
+frames_analyze = importlib.import_module("frames_analyze")
+models = importlib.import_module("models")
 
 
 def decode_events(messages: list[str]) -> list[dict]:
@@ -357,6 +361,108 @@ class ChooseDeviceTests(unittest.TestCase):
         self.assertIs(diarizer, fake_pipeline)
         fake_pipeline.to.assert_called_once_with("device:cuda")
         transcribe.get_diarizer.cache_clear()
+
+
+class AnalyzeSpeakerFramesTests(unittest.IsolatedAsyncioTestCase):
+    async def test_analyze_speaker_frames_prefers_named_candidate(self):
+        queue = asyncio.Queue()
+        loop = asyncio.get_running_loop()
+        diarization_segments = [
+            (0.0, 20.0, "SPEAKER_00"),
+            (30.0, 36.0, "SPEAKER_00"),
+            (40.0, 42.0, "SPEAKER_00"),
+        ]
+        candidates = [
+            models.SpeakerFrameResult(
+                person_visible=True,
+                caption_name=None,
+                active_panel_name=None,
+                appearance="person in blue shirt",
+                position="top-left",
+            ).model_dump_json(),
+            models.SpeakerFrameResult(
+                person_visible=True,
+                caption_name="Alice",
+                active_panel_name=None,
+                appearance="person in blue shirt",
+                position="top-left",
+            ).model_dump_json(),
+        ]
+
+        def fake_extract_single_frame(input_path: str, out_path: str, ts: int) -> bool:
+            Path(out_path).write_bytes(f"frame-{ts}".encode())
+            return True
+
+        with tempfile.TemporaryDirectory() as tmp_dir, (
+            mock.patch.object(
+                frames_analyze,
+                "extract_single_frame",
+                side_effect=fake_extract_single_frame,
+            ),
+            mock.patch.object(frames_analyze, "_ollama_vision_post", side_effect=candidates),
+            mock.patch.object(
+                frames_analyze,
+                "start_observation",
+                side_effect=lambda *args, **kwargs: contextlib.nullcontext(None),
+            ),
+        ):
+            result = frames_analyze.analyze_speaker_frames(
+                "video.mp4",
+                tmp_dir,
+                diarization_segments,
+                queue,
+                loop,
+            )
+
+        await asyncio.sleep(0)
+
+        self.assertIn("[SPEAKER_00 @ 33s]", result)
+        self.assertIn("name: Alice", result)
+        self.assertNotIn("[SPEAKER_00 @ 10s]", result)
+        self.assertEqual(await queue.get(), {"current": 1, "total": 1})
+        self.assertIsNone(await queue.get())
+
+    async def test_analyze_speaker_frames_keeps_zero_second_fallback(self):
+        queue = asyncio.Queue()
+        loop = asyncio.get_running_loop()
+        diarization_segments = [(0.0, 1.0, "SPEAKER_00")]
+        candidate = models.SpeakerFrameResult(
+            person_visible=True,
+            caption_name=None,
+            active_panel_name=None,
+            appearance="person in red sweater",
+            position="middle-center",
+        ).model_dump_json()
+
+        def fake_extract_single_frame(input_path: str, out_path: str, ts: int) -> bool:
+            Path(out_path).write_bytes(b"frame")
+            return True
+
+        with tempfile.TemporaryDirectory() as tmp_dir, (
+            mock.patch.object(
+                frames_analyze,
+                "extract_single_frame",
+                side_effect=fake_extract_single_frame,
+            ),
+            mock.patch.object(frames_analyze, "_ollama_vision_post", return_value=candidate),
+            mock.patch.object(
+                frames_analyze,
+                "start_observation",
+                side_effect=lambda *args, **kwargs: contextlib.nullcontext(None),
+            ),
+        ):
+            result = frames_analyze.analyze_speaker_frames(
+                "video.mp4",
+                tmp_dir,
+                diarization_segments,
+                queue,
+                loop,
+            )
+
+        await asyncio.sleep(0)
+
+        self.assertIn("[SPEAKER_00 @ 0s]", result)
+        self.assertIn("position: middle-center", result)
 
 
 class SummaryHelperTests(unittest.TestCase):
