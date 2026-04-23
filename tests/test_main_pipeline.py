@@ -21,6 +21,7 @@ install_test_stubs()
 main = importlib.import_module("main")
 transcribe = importlib.import_module("transcribe")
 helpers = importlib.import_module("helpers")
+summary = importlib.import_module("summary")
 
 
 def decode_events(messages: list[str]) -> list[dict]:
@@ -134,6 +135,10 @@ class ProcessGeneratorTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("tldr_done", event_names)
         self.assertLess(event_names.index("ffmpeg_done"), event_names.index("transcript_done"))
         self.assertLess(event_names.index("cleaned_done"), event_names.index("summary_done"))
+        cleaned_event = next(event for event in events if event["event"] == "cleaned_done")
+        self.assertEqual(cleaned_event["payload"]["text"], "cleaned transcript")
+        self.assertTrue(cleaned_event["payload"]["download_url"].startswith("/artifacts/"))
+        self.assertTrue(cleaned_event["payload"]["filename"].endswith(".cleaned.txt"))
         tldr_event = next(event for event in events if event["event"] == "tldr_done")
         self.assertEqual(tldr_event["payload"]["title"], "Краткое саммари")
         self.assertFalse(tldr_event["payload"]["is_meeting"])
@@ -262,7 +267,7 @@ class ChooseDeviceTests(unittest.TestCase):
         ):
             with self.assertRaisesRegex(
                 RuntimeError,
-                r"install\.bat/install\.sh.*torch\.version\.cuda=None",
+                r"torch\.version\.cuda=None.*install\.bat/install\.sh",
             ):
                 transcribe.choose_device()
 
@@ -274,6 +279,106 @@ class ChooseDeviceTests(unittest.TestCase):
             mock.patch.dict(sys.modules, {"torch": fake_torch}),
         ):
             self.assertEqual(transcribe.choose_device(), "cpu")
+
+    def test_choose_pyannote_device_uses_cuda_when_available(self):
+        fake_torch = mock.Mock()
+        fake_torch.cuda.is_available.return_value = True
+        fake_torch.device.side_effect = lambda name: f"device:{name}"
+        with (
+            mock.patch.dict(transcribe.__dict__, {"PYANNOTE_DEVICE": "auto"}),
+            mock.patch.dict(sys.modules, {"torch": fake_torch}),
+        ):
+            self.assertEqual(transcribe.choose_pyannote_device(), "device:cuda")
+
+    def test_choose_pyannote_device_allows_auto_fallback_to_cpu(self):
+        fake_torch = mock.Mock()
+        fake_torch.cuda.is_available.return_value = False
+        fake_torch.device.side_effect = lambda name: f"device:{name}"
+        with (
+            mock.patch.dict(transcribe.__dict__, {"PYANNOTE_DEVICE": "auto"}),
+            mock.patch.dict(sys.modules, {"torch": fake_torch}),
+        ):
+            self.assertEqual(transcribe.choose_pyannote_device(), "device:cpu")
+
+    def test_choose_pyannote_device_fails_when_cuda_required_but_unavailable(self):
+        fake_torch = mock.Mock()
+        fake_torch.__version__ = "2.8.0"
+        fake_torch.version.cuda = None
+        fake_torch.cuda.is_available.return_value = False
+        with (
+            mock.patch.dict(transcribe.__dict__, {"PYANNOTE_DEVICE": "cuda"}),
+            mock.patch.dict(sys.modules, {"torch": fake_torch}),
+        ):
+            with self.assertRaisesRegex(
+                RuntimeError,
+                r"PYANNOTE_DEVICE=auto/cpu",
+            ):
+                transcribe.choose_pyannote_device()
+
+    def test_get_diarizer_moves_pipeline_to_selected_device(self):
+        fake_pipeline = mock.Mock()
+        fake_pipeline_cls = mock.Mock()
+        fake_pipeline_cls.from_pretrained.return_value = fake_pipeline
+        fake_pyannote = mock.Mock(Pipeline=fake_pipeline_cls)
+
+        with (
+            mock.patch.dict(sys.modules, {"pyannote.audio": fake_pyannote}),
+            mock.patch.object(transcribe, "choose_pyannote_device", return_value="device:cuda"),
+        ):
+            transcribe.get_diarizer.cache_clear()
+            diarizer = transcribe.get_diarizer()
+
+        self.assertIs(diarizer, fake_pipeline)
+        fake_pipeline.to.assert_called_once_with("device:cuda")
+        transcribe.get_diarizer.cache_clear()
+
+
+class SummaryHelperTests(unittest.TestCase):
+    def test_detect_language_heuristically_prefers_ukrainian_chars(self):
+        self.assertEqual(
+            summary.detect_language_heuristically("Привіт, як твої справи? Це український текст."),
+            "uk",
+        )
+
+    def test_detect_language_heuristically_detects_russian(self):
+        self.assertEqual(
+            summary.detect_language_heuristically("Это русский текст, который содержит обычные слова."),
+            "ru",
+        )
+
+    def test_trim_visual_context_caps_large_input(self):
+        text = "a" * (summary.MAX_VISUAL_CONTEXT_CHARS + 50)
+        trimmed = summary.trim_visual_context(text)
+        self.assertLess(len(trimmed), len(text))
+        self.assertIn("[truncated]", trimmed)
+
+    def test_local_preclean_content_normalizes_spacing(self):
+        cleaned = summary.local_preclean_content("Hello,\tworld  !\n\n\nNext   line")
+        self.assertEqual(cleaned, "Hello, world!\n\nNext line")
+
+    def test_clean_content_uses_dedicated_clean_model(self):
+        with mock.patch.object(summary, "call_ollama", return_value="ok") as call_ollama:
+            result = summary.clean_content("Hello,\tworld  !", "ctx")
+
+        self.assertEqual(result, "ok")
+        self.assertEqual(call_ollama.call_args.kwargs["model"], summary.OLLAMA_CLEAN_MODEL)
+
+    def test_looks_like_missing_content_response_detects_placeholder(self):
+        self.assertTrue(
+            summary.looks_like_missing_content_response(
+                "Please provide the content you would like me to summarize."
+            )
+        )
+
+    def test_prefer_meaningful_content_falls_back_from_placeholder(self):
+        fallback = "[00:00:01] Hello team, let's start the meeting."
+        self.assertEqual(
+            summary.prefer_meaningful_content(
+                "Please provide the content you would like me to summarize.",
+                fallback,
+            ),
+            fallback,
+        )
 
 
 class NotificationTests(unittest.IsolatedAsyncioTestCase):

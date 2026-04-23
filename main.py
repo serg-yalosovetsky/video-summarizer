@@ -2,11 +2,14 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import shutil
 import subprocess
 import tempfile
 import time
+from pathlib import Path
 
+from config import settings
 from fastapi import FastAPI, File, Form, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
@@ -60,15 +63,13 @@ from frames_analyze import (
     FRAME_TIMESTAMPS,
     MAX_FRAMES,
     analyze_frames_with_progress,
+    analyze_speaker_frames,
     extract_frames,
     extract_frames_at,
     generate_frame_timestamps,
     is_context_sufficient,
 )
 from helpers import (
-    LOCAL_TMP,
-    MAX_UPLOAD_BYTES,
-    OLLAMA_MODEL,
     combine_sources,
     ensure_ollama_ready,
     log,
@@ -84,9 +85,16 @@ from summary import (
     generate_personal_todo,
     generate_short_summary,
     generate_summary,
+    looks_like_missing_content_response,
+    prefer_meaningful_content,
     translate_summary_to_russian,
 )
 from contextlib import asynccontextmanager
+
+OLLAMA_MODEL = settings.ollama_model
+OLLAMA_CLEAN_MODEL = settings.ollama_clean_model
+ARTIFACTS_DIR = settings.base_dir / "artifacts"
+ARTIFACTS_DIR.mkdir(exist_ok=True)
 
 from transcribe import (
     convert_to_wav,
@@ -95,6 +103,18 @@ from transcribe import (
     transcribe_by_segments,
     transcribe_with_canary,
 )
+
+
+def _build_artifact_stem(label: str) -> str:
+    stem = Path(label or "result").stem
+    safe_stem = re.sub(r"[^A-Za-z0-9._-]+", "-", stem).strip("-._") or "result"
+    return f"{time.strftime('%Y%m%d-%H%M%S')}-{safe_stem}"
+
+
+def _write_artifact(filename: str, content: str) -> Path:
+    path = ARTIFACTS_DIR / filename
+    path.write_text(content, encoding="utf-8")
+    return path
 
 
 async def process_generator(
@@ -112,11 +132,12 @@ async def process_generator(
         )
         return
 
-    tmp_dir = tempfile.mkdtemp(dir=LOCAL_TMP)
+    tmp_dir = tempfile.mkdtemp(dir=str(settings.local_tmp))
     total_start = time.monotonic()
     raw_transcript = ""
     visual_context = ""
     request_label = "chat-only"
+    artifact_stem = _build_artifact_stem(file.filename if file and file.filename else request_label)
 
     try:
         loop = asyncio.get_event_loop()
@@ -130,7 +151,7 @@ async def process_generator(
             content = await file.read()
             size_mb = len(content) / (1024 * 1024)
 
-            if len(content) > MAX_UPLOAD_BYTES:
+            if len(content) > settings.max_upload_bytes:
                 log.error("  [upload] ERROR: file exceeds 500 MB limit (%.1f MB)", size_mb)
                 yield sse(
                     "error",
@@ -203,100 +224,132 @@ async def process_generator(
                 log.info("  [frames] extracting frames...")
                 t0 = time.monotonic()
                 try:
-                    frame_paths = await loop.run_in_executor(
-                        None,
-                        extract_frames,
-                        input_path,
-                        tmp_dir,
-                        meta["duration_sec"],
-                    )
-                    if frame_paths:
-                        done_ts = set(FRAME_TIMESTAMPS)
-                        fq: asyncio.Queue = asyncio.Queue()
-                        ft = loop.run_in_executor(
+                    total_analyzed = 0
+                    if diarization_segments:
+                        # Diarization tells us exactly when each speaker talks — only analyze those frames
+                        unique_speakers = len({spk for _, _, spk in diarization_segments})
+                        yield sse("status", {"message": f"Analyzing speaker frames ({unique_speakers} speakers)..."})
+                        spk_q: asyncio.Queue = asyncio.Queue()
+                        spk_t = loop.run_in_executor(
                             None,
-                            analyze_frames_with_progress,
-                            frame_paths,
-                            fq,
+                            analyze_speaker_frames,
+                            input_path,
+                            tmp_dir,
+                            diarization_segments,
+                            spk_q,
                             loop,
                             0,
-                            len(frame_paths),
+                            unique_speakers,
                         )
                         while True:
-                            progress = await fq.get()
+                            progress = await spk_q.get()
                             if progress is None:
                                 break
                             yield sse("frames_progress", progress)
-                        visual_context = await ft
-                        total_analyzed = len(frame_paths)
-
-                        while (
-                            not is_context_sufficient(visual_context)
-                            and total_analyzed < MAX_FRAMES
-                        ):
-                            remaining = MAX_FRAMES - total_analyzed
-                            batch_count = min(4, remaining)
-                            new_ts = generate_frame_timestamps(
-                                done_ts, meta["duration_sec"], batch_count
-                            )
-                            if not new_ts:
-                                break
-                            done_ts.update(new_ts)
-                            log.info(
-                                "  [frames] context insufficient, scanning %d more (total %d/%d)...",
-                                len(new_ts),
-                                total_analyzed + len(new_ts),
-                                MAX_FRAMES,
-                            )
-                            yield sse(
-                                "status",
-                                {
-                                    "message": (
-                                        f"Context insufficient - scanning more frames "
-                                        f"({total_analyzed}/{MAX_FRAMES})..."
-                                    )
-                                },
-                            )
-                            new_paths = await loop.run_in_executor(
-                                None,
-                                extract_frames_at,
-                                input_path,
-                                tmp_dir,
-                                new_ts,
-                            )
-                            if not new_paths:
-                                break
-                            efq: asyncio.Queue = asyncio.Queue()
-                            eft = loop.run_in_executor(
+                        visual_context = await spk_t
+                        total_analyzed = unique_speakers
+                        log.info(
+                            "  [frames] speaker frames done (%d speakers, %.2fs)",
+                            unique_speakers,
+                            time.monotonic() - t0,
+                        )
+                    else:
+                        # No diarization — fall back to generic adaptive sampling
+                        frame_paths = await loop.run_in_executor(
+                            None,
+                            extract_frames,
+                            input_path,
+                            tmp_dir,
+                            meta["duration_sec"],
+                        )
+                        if frame_paths:
+                            done_ts = set(FRAME_TIMESTAMPS)
+                            fq: asyncio.Queue = asyncio.Queue()
+                            ft = loop.run_in_executor(
                                 None,
                                 analyze_frames_with_progress,
-                                new_paths,
-                                efq,
+                                frame_paths,
+                                fq,
                                 loop,
-                                total_analyzed,
-                                total_analyzed + len(new_paths),
+                                0,
+                                len(frame_paths),
                             )
                             while True:
-                                progress = await efq.get()
+                                progress = await fq.get()
                                 if progress is None:
                                     break
                                 yield sse("frames_progress", progress)
-                            extra_ctx = await eft
-                            visual_context = f"{visual_context}\n{extra_ctx}".strip()
-                            total_analyzed += len(new_paths)
+                            visual_context = await ft
+                            total_analyzed = len(frame_paths)
 
-                        log.info(
-                            "  [frames] done - %d frames  (%.2fs)",
-                            total_analyzed,
-                            time.monotonic() - t0,
-                        )
-                        yield sse(
-                            "frames_done",
-                            {
-                                "context": visual_context,
-                                "frames_count": total_analyzed,
-                            },
-                        )
+                            while (
+                                not is_context_sufficient(visual_context)
+                                and total_analyzed < MAX_FRAMES
+                            ):
+                                remaining = MAX_FRAMES - total_analyzed
+                                batch_count = min(4, remaining)
+                                new_ts = generate_frame_timestamps(
+                                    done_ts, meta["duration_sec"], batch_count
+                                )
+                                if not new_ts:
+                                    break
+                                done_ts.update(new_ts)
+                                log.info(
+                                    "  [frames] context insufficient, scanning %d more (total %d/%d)...",
+                                    len(new_ts),
+                                    total_analyzed + len(new_ts),
+                                    MAX_FRAMES,
+                                )
+                                yield sse(
+                                    "status",
+                                    {
+                                        "message": (
+                                            f"Context insufficient - scanning more frames "
+                                            f"({total_analyzed}/{MAX_FRAMES})..."
+                                        )
+                                    },
+                                )
+                                new_paths = await loop.run_in_executor(
+                                    None,
+                                    extract_frames_at,
+                                    input_path,
+                                    tmp_dir,
+                                    new_ts,
+                                )
+                                if not new_paths:
+                                    break
+                                efq: asyncio.Queue = asyncio.Queue()
+                                eft = loop.run_in_executor(
+                                    None,
+                                    analyze_frames_with_progress,
+                                    new_paths,
+                                    efq,
+                                    loop,
+                                    total_analyzed,
+                                    total_analyzed + len(new_paths),
+                                )
+                                while True:
+                                    progress = await efq.get()
+                                    if progress is None:
+                                        break
+                                    yield sse("frames_progress", progress)
+                                extra_ctx = await eft
+                                visual_context = f"{visual_context}\n{extra_ctx}".strip()
+                                total_analyzed += len(new_paths)
+
+                            log.info(
+                                "  [frames] done - %d frames  (%.2fs)",
+                                total_analyzed,
+                                time.monotonic() - t0,
+                            )
+
+                    yield sse(
+                        "frames_done",
+                        {
+                            "context": visual_context,
+                            "frames_count": total_analyzed,
+                        },
+                    )
                 except Exception as exc:
                     log.warning("  [frames] ERROR (non-fatal): %s", exc)
 
@@ -372,7 +425,21 @@ async def process_generator(
             return
         log.info("  [gemma/clean] done  (%.2fs)", time.monotonic() - t0)
         cleaned_text = remove_repetitions(cleaned_text)
-        yield sse("cleaned_done", {"text": cleaned_text})
+        cleaned_text = prefer_meaningful_content(cleaned_text, combined)
+        if looks_like_missing_content_response(cleaned_text):
+            log.warning("  [gemma/clean] model returned missing-content placeholder; using combined source text")
+        cleaned_artifact_path = _write_artifact(
+            f"{artifact_stem}.cleaned.txt",
+            cleaned_text,
+        )
+        yield sse(
+            "cleaned_done",
+            {
+                "text": cleaned_text,
+                "download_url": f"/artifacts/{cleaned_artifact_path.name}",
+                "filename": cleaned_artifact_path.name,
+            },
+        )
 
         is_meeting = False
         try:
@@ -386,21 +453,51 @@ async def process_generator(
         else:
             yield sse("status", {"message": "Generating summary with Gemma..."})
 
+        tldr_title = "Краткое саммари"
+        tldr_stage = "tldr"
+        tldr_message = "Generating short TL;DR with Gemma..."
+        tldr_callable = None
+        if is_meeting:
+            tldr_title = "ToDo для меня"
+            tldr_stage = "todo"
+            tldr_message = "Generating personal ToDo for you..."
+
+        yield sse("status", {"message": tldr_message})
         log.info("  [gemma/summary] calling ollama (meeting=%s)...", is_meeting)
-        t0 = time.monotonic()
+        log.info("  [gemma/%s] calling ollama in parallel...", tldr_stage)
+        summary_t0 = time.monotonic()
+        tldr_t0 = time.monotonic()
+        summary_input = prefer_meaningful_content(cleaned_text, combined)
+        if summary_input != cleaned_text:
+            log.warning("  [gemma/summary] cleaned text unusable; falling back to combined source")
+        if is_meeting:
+            tldr_callable = lambda: generate_personal_todo(summary_input)
+        else:
+            tldr_callable = lambda: generate_short_summary(summary_input)
+
+        summary_future = loop.run_in_executor(
+            None,
+            lambda: generate_summary(summary_input, is_meeting=is_meeting),
+        )
+        tldr_future = loop.run_in_executor(None, tldr_callable)
+
         try:
-            summary_text = await loop.run_in_executor(
-                None,
-                lambda: generate_summary(cleaned_text, is_meeting=is_meeting),
-            )
+            summary_text = await summary_future
         except Exception as exc:
             log.error("  [gemma/summary] ERROR: %s", exc)
+            tldr_future.cancel()
             yield sse(
                 "error",
                 {"message": f"Ollama (summary) error: {exc}", "stage": "summary"},
             )
             return
-        log.info("  [gemma/summary] done  (%.2fs)", time.monotonic() - t0)
+        if looks_like_missing_content_response(summary_text):
+            log.warning("  [gemma/summary] model returned missing-content placeholder; retrying once with fallback input")
+            summary_text = await loop.run_in_executor(
+                None,
+                lambda: generate_summary(summary_input, is_meeting=is_meeting),
+            )
+        log.info("  [gemma/summary] done  (%.2fs)", time.monotonic() - summary_t0)
 
         russian_summary_text = None
         try:
@@ -437,21 +534,8 @@ async def process_generator(
             },
         )
 
-        tldr_title = "Краткое саммари"
-        tldr_stage = "tldr"
-        tldr_message = "Generating short TL;DR with Gemma..."
-        tldr_callable = lambda: generate_short_summary(cleaned_text)
-        if is_meeting:
-            tldr_title = "ToDo для меня"
-            tldr_stage = "todo"
-            tldr_message = "Generating personal ToDo for you..."
-            tldr_callable = lambda: generate_personal_todo(cleaned_text)
-
-        yield sse("status", {"message": tldr_message})
-        log.info("  [gemma/%s] calling ollama...", tldr_stage)
-        t0 = time.monotonic()
         try:
-            tldr_text = await loop.run_in_executor(None, tldr_callable)
+            tldr_text = await tldr_future
         except Exception as exc:
             log.error("  [gemma/%s] ERROR: %s", tldr_stage, exc)
             yield sse(
@@ -459,7 +543,15 @@ async def process_generator(
                 {"message": f"Ollama ({tldr_stage}) error: {exc}", "stage": tldr_stage},
             )
             return
-        log.info("  [gemma/%s] done  (%.2fs)", tldr_stage, time.monotonic() - t0)
+        if looks_like_missing_content_response(tldr_text):
+            log.warning("  [gemma/%s] model returned missing-content placeholder; retrying once with fallback input", tldr_stage)
+            retry_callable = (
+                (lambda: generate_personal_todo(summary_input))
+                if is_meeting
+                else (lambda: generate_short_summary(summary_input))
+            )
+            tldr_text = await loop.run_in_executor(None, retry_callable)
+        log.info("  [gemma/%s] done  (%.2fs)", tldr_stage, time.monotonic() - tldr_t0)
         yield sse(
             "tldr_done",
             {
@@ -483,11 +575,18 @@ async def process_generator(
 async def lifespan(app):
     loop = asyncio.get_event_loop()
     log.info(
-        "Checking Ollama at startup (text=%s, frames=%s)...",
-        OLLAMA_MODEL,
-        FRAME_MODEL,
+        "Checking Ollama at startup (text=%s, clean=%s, frames=%s)...",
+        settings.ollama_model,
+        settings.ollama_clean_model,
+        settings.frame_model,
     )
-    await loop.run_in_executor(None, ensure_ollama_ready, OLLAMA_MODEL, FRAME_MODEL)
+    await loop.run_in_executor(
+        None,
+        ensure_ollama_ready,
+        settings.ollama_model,
+        settings.ollama_clean_model,
+        settings.frame_model,
+    )
     log.info("Ollama ready — service accepting requests.")
     log.info("Pre-loading Canary model at startup...")
     await loop.run_in_executor(None, get_canary_model)
@@ -496,6 +595,7 @@ async def lifespan(app):
 
 
 app = FastAPI(title="Video Summarizer", lifespan=lifespan)
+app.mount("/artifacts", StaticFiles(directory=str(ARTIFACTS_DIR)), name="artifacts")
 app.mount("/static", StaticFiles(directory="static"), name="static")
 
 

@@ -2,22 +2,26 @@ from __future__ import annotations
 
 import asyncio
 import base64
-import os
 import subprocess
 import time
+from pathlib import Path
 
 import httpx
 
-from helpers import OLLAMA_MODEL, OLLAMA_URL, log
-from prompts import FRAME_ANALYSIS_PROMPT, FRAME_ANALYSIS_SYSTEM
+from config import settings
+from helpers import log
+from models import FrameAnalysisResult, SpeakerFrameResult
+from prompts import (
+    FRAME_ANALYSIS_PROMPT,
+    FRAME_ANALYSIS_SYSTEM,
+    SPEAKER_FRAME_PROMPT_TEMPLATE,
+    SPEAKER_FRAME_SYSTEM,
+)
 
-# Separate vision model for frame analysis — must support images.
-# Set FRAME_MODEL in .env if the main OLLAMA_MODEL is text-only.
-FRAME_MODEL = os.environ.get("FRAME_MODEL") or OLLAMA_MODEL
-
-
-FRAME_TIMESTAMPS = [1, 2, 5, 10]
-MAX_FRAMES = 20
+OLLAMA_URL = settings.ollama_url
+FRAME_MODEL = settings.frame_model
+FRAME_TIMESTAMPS = list(settings.frame_timestamps)
+MAX_FRAMES = settings.max_frames
 
 
 def extract_single_frame(input_path: str, out_path: str, ts: int) -> bool:
@@ -38,7 +42,7 @@ def extract_single_frame(input_path: str, out_path: str, ts: int) -> bool:
         out_path,
     ]
     result = subprocess.run(cmd, capture_output=True)
-    return result.returncode == 0 and os.path.exists(out_path)
+    return result.returncode == 0 and Path(out_path).exists()
 
 
 def extract_frames(input_path: str, tmp_dir: str, duration_sec: float) -> list[str]:
@@ -46,7 +50,7 @@ def extract_frames(input_path: str, tmp_dir: str, duration_sec: float) -> list[s
     for ts in FRAME_TIMESTAMPS:
         if ts >= duration_sec:
             break
-        out_path = os.path.join(tmp_dir, f"frame_{ts}s.jpg")
+        out_path = str(Path(tmp_dir) / f"frame_{ts}s.jpg")
         if extract_single_frame(input_path, out_path, ts):
             paths.append(out_path)
     return paths
@@ -55,7 +59,7 @@ def extract_frames(input_path: str, tmp_dir: str, duration_sec: float) -> list[s
 def extract_frames_at(input_path: str, tmp_dir: str, timestamps: list[int]) -> list[str]:
     paths = []
     for ts in timestamps:
-        out_path = os.path.join(tmp_dir, f"frame_{ts}s.jpg")
+        out_path = str(Path(tmp_dir) / f"frame_{ts}s.jpg")
         if extract_single_frame(input_path, out_path, ts):
             paths.append(out_path)
     return paths
@@ -107,21 +111,18 @@ def is_context_sufficient(context: str) -> bool:
     return useful >= 2
 
 
-def analyze_frame(image_path: str) -> str:
-    img_size = os.path.getsize(image_path)
-    log.info("  [frames] → POST %s  model=%s  image=%s  size=%dKB",
-             OLLAMA_URL, FRAME_MODEL, os.path.basename(image_path), img_size // 1024)
-    with open(image_path, "rb") as file_handle:
-        b64 = base64.b64encode(file_handle.read()).decode()
+def _ollama_vision_post(prompt: str, system: str, b64_image: str, schema: dict) -> str:
+    """POST to Ollama vision endpoint with structured output; returns raw response string."""
     try:
         response = httpx.post(
             OLLAMA_URL,
             json={
                 "model": FRAME_MODEL,
-                "prompt": FRAME_ANALYSIS_PROMPT,
-                "system": FRAME_ANALYSIS_SYSTEM,
-                "images": [b64],
+                "prompt": prompt,
+                "system": system,
+                "images": [b64_image],
                 "stream": False,
+                "format": schema,
             },
             timeout=120.0,
         )
@@ -140,6 +141,89 @@ def analyze_frame(image_path: str) -> str:
     return response.json()["response"]
 
 
+def analyze_frame(image_path: str) -> str:
+    img_size = Path(image_path).stat().st_size
+    log.info("  [frames] → POST %s  model=%s  image=%s  size=%dKB",
+             OLLAMA_URL, FRAME_MODEL, Path(image_path).name, img_size // 1024)
+    with open(image_path, "rb") as file_handle:
+        b64 = base64.b64encode(file_handle.read()).decode()
+    raw = _ollama_vision_post(
+        FRAME_ANALYSIS_PROMPT,
+        FRAME_ANALYSIS_SYSTEM,
+        b64,
+        FrameAnalysisResult.model_json_schema(),
+    )
+    try:
+        return FrameAnalysisResult.model_validate_json(raw).to_context_str()
+    except Exception:
+        return raw
+
+
+
+
+def analyze_speaker_frames(
+    input_path: str,
+    tmp_dir: str,
+    diarization_segments: list[tuple[float, float, str]],
+    async_q: asyncio.Queue,
+    loop: asyncio.AbstractEventLoop,
+    start_index: int = 0,
+    total_hint: int | None = None,
+) -> str:
+    """Extract and analyze one frame per unique speaker; falls back to next-longest segment if confidence is low."""
+    from collections import defaultdict
+    speaker_segs: dict[str, list[tuple[float, float]]] = defaultdict(list)
+    for start, end, spk in diarization_segments:
+        speaker_segs[spk].append((start, end))
+    for spk in speaker_segs:
+        speaker_segs[spk].sort(key=lambda s: s[1] - s[0], reverse=True)
+
+    results = []
+    total = total_hint or (start_index + len(speaker_segs))
+    for idx, spk in enumerate(sorted(speaker_segs), start=1):
+        loop.call_soon_threadsafe(
+            async_q.put_nowait,
+            {"current": start_index + idx, "total": total},
+        )
+        result: SpeakerFrameResult | None = None
+        used_ts = None
+        for start, end in speaker_segs[spk]:
+            ts = int((start + end) / 2)
+            out_path = str(Path(tmp_dir) / f"frame_spk_{spk}_{ts}s.jpg")
+            if not extract_single_frame(input_path, out_path, ts):
+                continue
+            prompt = SPEAKER_FRAME_PROMPT_TEMPLATE.format(speaker_id=spk, ts=ts)
+            with open(out_path, "rb") as fh:
+                b64 = base64.b64encode(fh.read()).decode()
+            try:
+                raw = _ollama_vision_post(
+                    prompt,
+                    SPEAKER_FRAME_SYSTEM,
+                    b64,
+                    SpeakerFrameResult.model_json_schema(),
+                )
+                candidate = SpeakerFrameResult.model_validate_json(raw)
+            except Exception as exc:
+                log.warning("  [frames] speaker frame error for %s @ %ds: %s", spk, ts, exc)
+                continue
+            if candidate.person_visible:
+                result = candidate
+                used_ts = ts
+                break
+            log.info("  [frames] low-confidence frame for %s @ %ds, trying next segment", spk, ts)
+            result = candidate
+            used_ts = ts
+
+        if result and used_ts is not None:
+            results.append(result.to_context_str(spk, used_ts))
+            log.info("  [frames] speaker frame analyzed: %s @ %ds", spk, used_ts)
+        else:
+            log.warning("  [frames] no usable frame found for %s", spk)
+
+    loop.call_soon_threadsafe(async_q.put_nowait, None)
+    return "\n".join(results)
+
+
 def analyze_frames_with_progress(
     image_paths: list[str],
     async_q: asyncio.Queue,
@@ -156,7 +240,7 @@ def analyze_frames_with_progress(
             async_q.put_nowait,
             {"current": start_index + index, "total": total},
         )
-        ts_label = os.path.basename(path).replace("frame_", "").replace(".jpg", "")
+        ts_label = Path(path).name.replace("frame_", "").replace(".jpg", "")
         try:
             desc = analyze_frame(path)
             results.append(f"[{ts_label}] {desc}")

@@ -5,11 +5,10 @@ Usage:
     python download_model.py
 """
 
-import os
 import logging
-from dotenv import load_dotenv
+from pathlib import Path
 
-load_dotenv()
+from config import settings
 
 logging.basicConfig(
     level=logging.INFO,
@@ -19,7 +18,7 @@ logging.basicConfig(
 log = logging.getLogger("download")
 
 MODEL = "Systran/faster-whisper-large-v3"
-HF_TOKEN = os.environ.get("HF_TOKEN")
+HF_TOKEN = settings.hf_token
 
 if HF_TOKEN:
     log.info("HF token found — authenticated download.")
@@ -50,7 +49,7 @@ for i, filename in enumerate(files, 1):
         filename=filename,
         token=HF_TOKEN,
     )
-    size_mb = os.path.getsize(path) / 1024 / 1024
+    size_mb = Path(path).stat().st_size / 1024 / 1024
     log.info("[%d/%d] done — %.1f MB  →  %s", i, total, size_mb, path)
 
 log.info("All files downloaded. Model is ready.")

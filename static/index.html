@@ -321,10 +321,14 @@
     .summary-content li { margin-bottom: 0.25rem; }
 
     /* Timer widget */
-    #timer-widget {
+    #timer-shell {
       position: fixed;
       bottom: 1.25rem;
       right: 1.25rem;
+      z-index: 1000;
+    }
+
+    #timer-widget {
       background: rgba(15, 17, 23, 0.94);
       border: 1px solid var(--border);
       border-radius: var(--radius);
@@ -332,9 +336,15 @@
       min-width: 215px;
       backdrop-filter: blur(10px);
       font-size: 0.78rem;
-      z-index: 1000;
       box-shadow: 0 4px 24px rgba(0,0,0,0.5);
       font-family: 'Consolas', 'Cascadia Code', monospace;
+      transition: transform 0.28s ease, opacity 0.28s ease;
+      will-change: transform;
+    }
+
+    #timer-shell.is-collapsed #timer-widget {
+      transform: translateX(calc(100% + 0.85rem));
+      opacity: 0.35;
     }
 
     #timer-header {
@@ -362,6 +372,36 @@
       opacity: 0.6;
     }
     #timer-hide-btn:hover { opacity: 1; }
+
+    #timer-show-btn {
+      position: absolute;
+      right: -0.2rem;
+      bottom: 0.95rem;
+      width: 26px;
+      height: 44px;
+      display: none;
+      align-items: center;
+      justify-content: center;
+      background: rgba(15, 17, 23, 0.96);
+      border: 1px solid var(--border);
+      border-right: none;
+      border-radius: 10px 0 0 10px;
+      color: var(--text-muted);
+      cursor: pointer;
+      box-shadow: 0 4px 18px rgba(0,0,0,0.38);
+      font-size: 0.95rem;
+      line-height: 1;
+      transition: color 0.2s, background 0.2s;
+    }
+
+    #timer-show-btn:hover {
+      color: var(--text);
+      background: rgba(26, 29, 39, 0.98);
+    }
+
+    #timer-shell.is-collapsed #timer-show-btn {
+      display: flex;
+    }
 
     .timer-row {
       display: flex;
@@ -490,6 +530,9 @@
         <span class="badge" id="badge-cleaned">...</span>
       </summary>
       <div class="spoiler-body">
+        <div id="cleaned-download-wrap" style="display:none; margin-bottom:0.75rem;">
+          <a id="cleaned-download-link" href="" download>Скачать очищенную транскрипцию</a>
+        </div>
         <pre id="content-cleaned"></pre>
       </div>
     </details>
@@ -512,18 +555,33 @@
     </div>
   </main>
 
-  <div id="timer-widget" style="display:none">
-    <div id="timer-header">Pipeline<button id="timer-hide-btn" title="Hide" onclick="document.getElementById('timer-widget').style.display='none'">✕</button></div>
-    <div id="timer-rows"></div>
-    <div id="timer-total">
-      <span>Total</span>
-      <span id="timer-total-time"></span>
+  <div id="timer-shell" style="display:none">
+    <div id="timer-widget">
+      <div id="timer-header">Pipeline<button id="timer-hide-btn" title="Hide">✕</button></div>
+      <div id="timer-rows"></div>
+      <div id="timer-total">
+        <span>Total</span>
+        <span id="timer-total-time"></span>
+      </div>
     </div>
+    <button id="timer-show-btn" title="Show">&lt;</button>
   </div>
 
   <script>
     // ── Timer ────────────────────────────────────────────────────────────
     let _timerStages = [], _timerTick = null, _pipelineStart = null;
+    let _timerCollapsed = false;
+    const timerShell = document.getElementById('timer-shell');
+    const timerHideBtn = document.getElementById('timer-hide-btn');
+    const timerShowBtn = document.getElementById('timer-show-btn');
+
+    function setTimerCollapsed(collapsed) {
+      _timerCollapsed = collapsed;
+      timerShell.classList.toggle('is-collapsed', collapsed);
+    }
+
+    timerHideBtn.addEventListener('click', () => setTimerCollapsed(true));
+    timerShowBtn.addEventListener('click', () => setTimerCollapsed(false));
 
     function fmtMs(ms) {
       if (ms < 60000) return (ms / 1000).toFixed(1) + 's';
@@ -533,7 +591,8 @@
     function timerReset() {
       _timerStages = []; _pipelineStart = null;
       if (_timerTick) { clearInterval(_timerTick); _timerTick = null; }
-      document.getElementById('timer-widget').style.display = 'none';
+      timerShell.style.display = 'none';
+      setTimerCollapsed(false);
     }
     function timerStageStart(id, label) {
       if (_timerStages.find(s => s.id === id)) return;
@@ -549,7 +608,7 @@
     }
     function _timerRender() {
       const now = Date.now(), rows = document.getElementById('timer-rows');
-      document.getElementById('timer-widget').style.display = '';
+      timerShell.style.display = '';
       rows.innerHTML = _timerStages.map(s => {
         const ms = (s.end || now) - s.start, active = !s.end;
         return `<div class="timer-row">
@@ -614,6 +673,9 @@
       document.getElementById('content-transcript').textContent = '';
       document.getElementById('content-cleaned').textContent = '';
       document.getElementById('content-summary').innerHTML = '';
+      document.getElementById('cleaned-download-wrap').style.display = 'none';
+      document.getElementById('cleaned-download-link').href = '';
+      document.getElementById('cleaned-download-link').removeAttribute('download');
       document.getElementById('tldr-card').style.display = 'none';
       document.getElementById('tldr-title').textContent = 'Краткое саммари';
       document.getElementById('content-tldr').textContent = '';
@@ -745,6 +807,15 @@
 
         case 'cleaned_done':
           showSpoiler('cleaned', payload.text);
+          if (payload.download_url) {
+            const link = document.getElementById('cleaned-download-link');
+            link.href = payload.download_url;
+            if (payload.filename) {
+              link.setAttribute('download', payload.filename);
+            }
+            document.getElementById('cleaned-download-wrap').style.display = '';
+          }
+          document.getElementById('spoiler-cleaned').setAttribute('open', '');
           break;
 
         case 'summary_done': {

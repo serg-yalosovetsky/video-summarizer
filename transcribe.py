@@ -15,15 +15,13 @@ import tempfile
 from functools import lru_cache
 from pathlib import Path
 
+from config import settings
 from helpers import HF_TOKEN, log, tail_text
 
-
-CANARY_MODEL = os.environ.get("CANARY_MODEL", "nvidia/canary-1b-v2")
-CANARY_DEVICE = os.environ.get("CANARY_DEVICE", "cuda").strip().lower()
-CANARY_SEGMENT_BATCH_SIZE = max(
-    1,
-    int(os.environ.get("CANARY_SEGMENT_BATCH_SIZE", "8")),
-)
+CANARY_MODEL = settings.canary_model
+CANARY_DEVICE = settings.canary_device
+PYANNOTE_DEVICE = settings.pyannote_device
+CANARY_SEGMENT_BATCH_SIZE = settings.canary_segment_batch_size
 
 
 def parse_args() -> argparse.Namespace:
@@ -66,6 +64,32 @@ def choose_device() -> str:
         f"{cuda_diagnostics(torch)}. "
         "Run install.bat/install.sh to install a CUDA-enabled PyTorch build and verify NVIDIA drivers, "
         "or set CANARY_DEVICE=auto/cpu if you intentionally want CPU mode."
+    )
+
+
+def choose_pyannote_device():
+    import torch
+
+    if PYANNOTE_DEVICE not in {"cuda", "cpu", "auto"}:
+        raise RuntimeError(
+            f"Unsupported PYANNOTE_DEVICE={PYANNOTE_DEVICE!r}. Use one of: cuda, cpu, auto."
+        )
+
+    if PYANNOTE_DEVICE == "cpu":
+        return torch.device("cpu")
+
+    if torch.cuda.is_available():
+        return torch.device("cuda")
+
+    if PYANNOTE_DEVICE == "auto":
+        log.warning("CUDA is unavailable for pyannote, falling back to CPU.")
+        return torch.device("cpu")
+
+    raise RuntimeError(
+        "CUDA is required for pyannote diarization but is unavailable. "
+        f"{cuda_diagnostics(torch)}. "
+        "Run install.bat/install.sh to install a CUDA-enabled PyTorch build and verify NVIDIA drivers, "
+        "or set PYANNOTE_DEVICE=auto/cpu if you intentionally want CPU mode."
     )
 
 
@@ -151,7 +175,7 @@ def convert_to_wav(input_path: str, output_path: str) -> dict:
         )
 
     file_info = (
-        f"File: {os.path.basename(input_path)}\n"
+        f"File: {Path(input_path).name}\n"
         f"Format: {format_name}\n"
         f"Duration: {duration_str}\n"
         f"Audio codec: {codec}\n"
@@ -228,11 +252,15 @@ def get_diarizer():
     from pyannote.audio import Pipeline
 
     log.info("Loading pyannote diarization model...")
-    model_id = os.environ.get("PYANNOTE_MODEL", "pyannote/speaker-diarization-3.1")
+    model_id = settings.pyannote_model
     pipeline = Pipeline.from_pretrained(
         model_id,
         token=HF_TOKEN or True,
     )
+    device = choose_pyannote_device()
+    if hasattr(pipeline, "to"):
+        pipeline.to(device)
+    log.info("  [pyannote] device: %s", device)
     log.info("Diarizer ready.")
     return pipeline
 
@@ -302,7 +330,7 @@ def transcribe_by_segments(
         total = len(merged)
         prepared_chunks: list[tuple[float, float, str, str]] = []
         for i, (start, end, speaker) in enumerate(merged, 1):
-            chunk_path = os.path.join(_tmp, f"chunk_{i:04d}.wav")
+            chunk_path = str(Path(_tmp) / f"chunk_{i:04d}.wav")
             if not extract_audio_chunk(wav_path, start, end, chunk_path):
                 log.warning("  [canary] chunk %d: ffmpeg extraction failed", i)
                 continue

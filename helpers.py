@@ -4,27 +4,11 @@ import json
 import logging
 import os
 import re
-import subprocess
 from functools import lru_cache
 
 import httpx
-from dotenv import load_dotenv
 
-
-check = load_dotenv()
-print(f"Loaded .env: {check}")
-print(f"HF_TOKEN: {os.environ.get('HF_TOKEN')}")
-print(f"OLLAMA_BASE_URL: {os.environ.get('OLLAMA_BASE_URL')}")
-
-HF_TOKEN = (
-    os.environ.get("HUGGING_FACE_HUB_TOKEN")
-    or os.environ.get("HF_TOKEN")
-    or os.environ.get("HUGGINGFACE_HUB_TOKEN")
-)
-if HF_TOKEN:
-    os.environ.setdefault("HUGGING_FACE_HUB_TOKEN", HF_TOKEN)
-    os.environ.setdefault("HF_TOKEN", HF_TOKEN)
-    os.environ.setdefault("HUGGINGFACE_HUB_TOKEN", HF_TOKEN)
+from config import settings
 
 logging.basicConfig(
     level=logging.INFO,
@@ -59,37 +43,13 @@ logging.getLogger("nemo_logger").addFilter(_benign_nemo_log_filter)
 for _handler in logging.getLogger().handlers:
     _handler.addFilter(_benign_nemo_log_filter)
 
-
-def ollama_base_url() -> str:
-    """Resolve Ollama host. Supports OLLAMA_BASE_URL / OLLAMA_HOST / OLLAMA_URL."""
-    load_dotenv()
-    host = (
-        os.environ.get("OLLAMA_BASE_URL")
-        or os.environ.get("OLLAMA_HOST")
-        or os.environ.get("OLLAMA_URL")
-    )
-    if host:
-        if "/api/" in host:
-            return host
-        return host.rstrip("/") + "/api/generate"
-    try:
-        gateway = subprocess.check_output(
-            ["ip", "route", "show", "default"],
-            text=True,
-        ).split()[2]
-        return f"http://{gateway}:11434/api/generate"
-    except Exception:
-        return "http://localhost:11434/api/generate"
-
-
-OLLAMA_URL = ollama_base_url()
-OLLAMA_MODEL = os.environ.get("OLLAMA_MODEL", "gemma4:e4b")
-MAX_UPLOAD_BYTES = 500 * 1024 * 1024
-
-BASE_DIR = os.path.dirname(os.path.abspath(__file__))
-LOCAL_TMP = os.path.join(BASE_DIR, "tmp")
-os.makedirs(LOCAL_TMP, exist_ok=True)
-PROJECT_MEMORY_PATH = os.path.join(BASE_DIR, ".omx", "project-memory.json")
+HF_TOKEN = settings.hf_token
+OLLAMA_URL = settings.ollama_url
+OLLAMA_MODEL = settings.ollama_model
+OLLAMA_CLEAN_MODEL = settings.ollama_clean_model
+MAX_UPLOAD_BYTES = settings.max_upload_bytes
+LOCAL_TMP = str(settings.local_tmp)
+PROJECT_MEMORY_PATH = str(settings.project_memory_path)
 
 
 def tail_text(text: str, limit: int = 500) -> str:
@@ -174,8 +134,8 @@ def remove_repetitions(text: str, max_consecutive: int = 2) -> str:
     return "\n".join(result)
 
 
-NTFY_TOPIC = os.environ.get("NTFY_TOPIC", "syalosovetskyi_subscribe_topic")
-NTFY_URL = f"https://ntfy.sh/{NTFY_TOPIC}"
+NTFY_TOPIC = settings.ntfy_topic
+NTFY_URL = settings.ntfy_url
 
 
 def _ntfy_payload(title: str, message: str) -> dict:
@@ -189,6 +149,8 @@ def _ntfy_payload(title: str, message: str) -> dict:
 
 
 def _desktop_notifications_available() -> bool:
+    import os
+
     return bool(os.environ.get("DBUS_SESSION_BUS_ADDRESS")) and bool(
         os.environ.get("DISPLAY") or os.environ.get("WAYLAND_DISPLAY")
     )
@@ -213,14 +175,22 @@ async def notify_done(title: str, message: str) -> None:
         log.warning("Desktop notification failed: %s", exc)
 
 
-def call_ollama(prompt: str, system: str = "", *, timeout: float = 900.0) -> str:
+def call_ollama(
+    prompt: str,
+    system: str = "",
+    *,
+    timeout: float = 900.0,
+    model: str | None = None,
+    options: dict | None = None,
+) -> str:
     response = httpx.post(
         OLLAMA_URL,
         json={
-            "model": OLLAMA_MODEL,
+            "model": model or OLLAMA_MODEL,
             "prompt": prompt,
             "system": system,
             "stream": False,
+            "options": options or {},
         },
         timeout=timeout,
     )

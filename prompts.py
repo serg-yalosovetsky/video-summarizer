@@ -134,6 +134,20 @@ MEETING_SUMMARY_PROMPT_TEMPLATE = (
     "Transcript:\n{transcript}"
 )
 
+SPEAKER_FRAME_SYSTEM = (
+    "You are identifying a meeting participant from a single video frame. "
+    "Be concise and factual."
+)
+
+SPEAKER_FRAME_PROMPT_TEMPLATE = (
+    "This frame was captured at the moment {speaker_id} is speaking (at {ts}s into the video).\n"
+    "Describe this person:\n"
+    "1) Any visible name tag, lower-third, or on-screen label — state the exact name if present\n"
+    "2) Their appearance (gender, clothing, hair) so they can be distinguished from others\n"
+    "3) Their position in the frame (left, center, right)\n"
+    "If you cannot see any person, say so briefly."
+)
+
 LANGUAGE_CHECK_SYSTEM = (
     "You are a strict language classifier. "
     "Return only one token: ru, uk, or other."
