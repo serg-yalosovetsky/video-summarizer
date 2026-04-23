@@ -99,7 +99,7 @@ CANARY_DEVICE=auto
 ## Running the web app
 
 ```bash
-uvicorn main:app --host 0.0.0.0 --port 8000
+uvicorn main:app --host 0.0.0.0 --port 8888
 ```
 
 Or use the bootstrap scripts, which install `uv`, install the pinned Python version, create `.venv`, install dependencies, and then start the app:
@@ -114,7 +114,7 @@ On Windows:
 run.bat
 ```
 
-Open [http://localhost:8000](http://localhost:8000), upload a file, and click **Суммаризировать**.
+Open [http://localhost:8888](http://localhost:8888), upload a file, and click **Суммаризировать**.
 
 On first run the Canary model is downloaded from HuggingFace (~2 GB) and cached locally.
 
@@ -194,7 +194,7 @@ docker build -t video-summarizer .
 Run on Windows/macOS Docker Desktop with Ollama on the host:
 
 ```bash
-docker run --rm -p 8000:8000 ^
+docker run --rm -p 8888:8888 ^
   -e OLLAMA_URL=http://host.docker.internal:11434/api/generate ^
   -e OLLAMA_MODEL=gemma4:e4b ^
   -e HF_TOKEN=your_hf_token ^
@@ -204,7 +204,7 @@ docker run --rm -p 8000:8000 ^
 Run on Linux with Ollama on the host:
 
 ```bash
-docker run --rm -p 8000:8000 \
+docker run --rm -p 8888:8888 \
   --add-host=host.docker.internal:host-gateway \
   -e OLLAMA_URL=http://host.docker.internal:11434/api/generate \
   -e OLLAMA_MODEL=gemma4:e4b \

@@ -30,6 +30,32 @@ logging.basicConfig(
 )
 log = logging.getLogger("summarizer")
 
+_BENIGN_NEMO_CLASSLOAD_FRAGMENT = (
+    "Error getting class at nemo.collections.asr.modules.transformer.get_nemo_transformer"
+)
+_BENIGN_NEMO_CLASSLOAD_DETAIL = "Located non-class of type 'function'"
+
+
+def is_benign_nemo_transformer_log(message: str | None) -> bool:
+    if not message:
+        return False
+    return (
+        _BENIGN_NEMO_CLASSLOAD_FRAGMENT in message
+        and _BENIGN_NEMO_CLASSLOAD_DETAIL in message
+    )
+
+
+class _BenignNeMoLogFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        return not is_benign_nemo_transformer_log(record.getMessage())
+
+
+_benign_nemo_log_filter = _BenignNeMoLogFilter()
+logging.getLogger().addFilter(_benign_nemo_log_filter)
+logging.getLogger("nemo_logger").addFilter(_benign_nemo_log_filter)
+for _handler in logging.getLogger().handlers:
+    _handler.addFilter(_benign_nemo_log_filter)
+
 
 def ollama_base_url() -> str:
     """Resolve Ollama host. Supports OLLAMA_BASE_URL / OLLAMA_HOST / OLLAMA_URL."""
@@ -73,6 +99,49 @@ def sse(event: str, payload: dict) -> str:
     return f"data: {json.dumps({'event': event, 'payload': payload})}\n\n"
 
 
+def ollama_api_base() -> str:
+    if "/api/" in OLLAMA_URL:
+        return OLLAMA_URL.split("/api/", 1)[0]
+    return OLLAMA_URL.rstrip("/")
+
+
+def ollama_tags_url() -> str:
+    return ollama_api_base().rstrip("/") + "/api/tags"
+
+
+def ensure_ollama_ready(*models: str, timeout: float = 10.0) -> None:
+    unique_models = []
+    seen_models = set()
+    for model in models:
+        if not model or model in seen_models:
+            continue
+        unique_models.append(model)
+        seen_models.add(model)
+
+    try:
+        response = httpx.get(ollama_tags_url(), timeout=timeout)
+        response.raise_for_status()
+    except httpx.HTTPError as exc:
+        raise RuntimeError(
+            f"Ollama is not reachable at {ollama_api_base()} ({exc})"
+        ) from exc
+
+    data = response.json()
+    available_models = {
+        item.get("name", "").strip()
+        for item in data.get("models", [])
+        if item.get("name")
+    }
+    missing_models = [model for model in unique_models if model not in available_models]
+    if missing_models:
+        raise RuntimeError(
+            "Ollama model(s) not found: "
+            + ", ".join(missing_models)
+            + ". Available models: "
+            + ", ".join(sorted(available_models) or ["<none>"])
+        )
+
+
 def combine_sources(transcript: str, chat: str) -> str:
     parts = []
     if transcript.strip():
@@ -107,7 +176,16 @@ NTFY_URL = f"https://ntfy.sh/{NTFY_TOPIC}"
 
 async def notify_done(title: str, message: str) -> None:
     try:
-        httpx.post(NTFY_URL, content=message.encode(), headers={"Title": title}, timeout=5.0)
+        async with httpx.AsyncClient(timeout=5.0) as client:
+            await client.post(
+                NTFY_URL,
+                content=message.encode(),
+                headers={
+                    "Title": title,
+                    "Priority": "default",
+                    "Tags": "white_check_mark",
+                },
+            )
     except Exception as exc:
         log.warning("ntfy notification failed: %s", exc)
     try:

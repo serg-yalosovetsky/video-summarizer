@@ -173,6 +173,28 @@ class ProcessGeneratorTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(tldr_event["payload"]["is_meeting"])
         self.assertEqual(tldr_event["payload"]["text"], "todo for sergey")
 
+    async def test_lifespan_checks_ollama_before_loading_canary(self):
+        calls = []
+
+        def fake_ensure_ollama_ready(*models, timeout=10.0):
+            calls.append(("ollama", models, timeout))
+
+        def fake_get_canary_model():
+            calls.append(("canary",))
+            return object()
+
+        with (
+            mock.patch.object(main, "ensure_ollama_ready", side_effect=fake_ensure_ollama_ready),
+            mock.patch.object(main, "get_canary_model", side_effect=fake_get_canary_model),
+        ):
+            async with main.lifespan(main.app):
+                pass
+
+        self.assertEqual(calls[0][0], "ollama")
+        self.assertEqual(calls[1][0], "canary")
+        self.assertIn(main.OLLAMA_MODEL, calls[0][1])
+        self.assertIn(main.FRAME_MODEL, calls[0][1])
+
 
 class ChooseDeviceTests(unittest.TestCase):
     def test_choose_device_uses_cuda_when_available(self):

@@ -319,6 +319,84 @@
     }
 
     .summary-content li { margin-bottom: 0.25rem; }
+
+    /* Timer widget */
+    #timer-widget {
+      position: fixed;
+      bottom: 1.25rem;
+      right: 1.25rem;
+      background: rgba(15, 17, 23, 0.94);
+      border: 1px solid var(--border);
+      border-radius: var(--radius);
+      padding: 0.7rem 0.9rem;
+      min-width: 215px;
+      backdrop-filter: blur(10px);
+      font-size: 0.78rem;
+      z-index: 1000;
+      box-shadow: 0 4px 24px rgba(0,0,0,0.5);
+      font-family: 'Consolas', 'Cascadia Code', monospace;
+    }
+
+    #timer-header {
+      font-size: 0.68rem;
+      font-weight: 700;
+      color: var(--text-muted);
+      text-transform: uppercase;
+      letter-spacing: 0.06em;
+      margin-bottom: 0.5rem;
+      padding-bottom: 0.4rem;
+      border-bottom: 1px solid var(--border);
+    }
+
+    .timer-row {
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+      padding: 0.18rem 0;
+    }
+
+    .timer-dot {
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      flex-shrink: 0;
+    }
+
+    .timer-dot-active {
+      background: var(--accent);
+      box-shadow: 0 0 6px var(--accent);
+      animation: timerPulse 1s ease-in-out infinite;
+    }
+
+    .timer-dot-done { background: var(--green); }
+
+    @keyframes timerPulse {
+      0%, 100% { opacity: 1; }
+      50%       { opacity: 0.35; }
+    }
+
+    .timer-label { flex: 1; color: var(--text-muted); }
+
+    .timer-time {
+      color: var(--text);
+      font-variant-numeric: tabular-nums;
+    }
+
+    .timer-time-active { color: var(--accent); }
+
+    #timer-total {
+      display: none;
+      margin-top: 0.45rem;
+      padding-top: 0.45rem;
+      border-top: 1px solid var(--border);
+      justify-content: space-between;
+      color: var(--text-muted);
+    }
+
+    #timer-total-time {
+      color: var(--text);
+      font-variant-numeric: tabular-nums;
+    }
   </style>
 </head>
 <body>
@@ -419,7 +497,80 @@
     </div>
   </main>
 
+  <div id="timer-widget" style="display:none">
+    <div id="timer-header">Pipeline</div>
+    <div id="timer-rows"></div>
+    <div id="timer-total">
+      <span>Total</span>
+      <span id="timer-total-time"></span>
+    </div>
+  </div>
+
   <script>
+    // ── Timer ────────────────────────────────────────────────────────────
+    let _timerStages = [], _timerTick = null, _pipelineStart = null;
+
+    function fmtMs(ms) {
+      if (ms < 60000) return (ms / 1000).toFixed(1) + 's';
+      const m = Math.floor(ms / 60000), s = Math.floor((ms % 60000) / 1000);
+      return `${m}:${s.toString().padStart(2, '0')}`;
+    }
+    function timerReset() {
+      _timerStages = []; _pipelineStart = null;
+      if (_timerTick) { clearInterval(_timerTick); _timerTick = null; }
+      document.getElementById('timer-widget').style.display = 'none';
+    }
+    function timerStageStart(id, label) {
+      if (_timerStages.find(s => s.id === id)) return;
+      if (!_pipelineStart) _pipelineStart = Date.now();
+      _timerStages.push({ id, label, start: Date.now(), end: null });
+      if (!_timerTick) _timerTick = setInterval(_timerRender, 200);
+      _timerRender();
+    }
+    function timerStageEnd(id) {
+      const s = _timerStages.find(s => s.id === id);
+      if (s && !s.end) s.end = Date.now();
+      _timerRender();
+    }
+    function _timerRender() {
+      const now = Date.now(), rows = document.getElementById('timer-rows');
+      document.getElementById('timer-widget').style.display = '';
+      rows.innerHTML = _timerStages.map(s => {
+        const ms = (s.end || now) - s.start, active = !s.end;
+        return `<div class="timer-row">
+          <span class="timer-dot ${active ? 'timer-dot-active' : 'timer-dot-done'}"></span>
+          <span class="timer-label">${s.label}</span>
+          <span class="timer-time${active ? ' timer-time-active' : ''}">${fmtMs(ms)}</span>
+        </div>`;
+      }).join('');
+      const allDone = _timerStages.length > 0 && _timerStages.every(s => s.end);
+      const totalEl = document.getElementById('timer-total');
+      const wallMs = _pipelineStart ? (allDone ? Math.max(..._timerStages.map(s => s.end)) : now) - _pipelineStart : 0;
+      totalEl.style.display = wallMs ? 'flex' : 'none';
+      document.getElementById('timer-total-time').textContent = fmtMs(wallMs);
+      if (allDone && _timerTick) { clearInterval(_timerTick); _timerTick = null; }
+    }
+
+    const STATUS_STAGES = [
+      { re: /converting media/i,              id: 'ffmpeg',        label: 'FFmpeg' },
+      { re: /speaker diarization/i,           id: 'diarization',   label: 'Diarization' },
+      { re: /video frames/i,                  id: 'frames',        label: 'Frame analysis' },
+      { re: /transcribing audio/i,            id: 'transcription', label: 'Transcription' },
+      { re: /cleaning content/i,              id: 'cleaning',      label: 'Cleaning' },
+      { re: /generating (meeting )?summary/i, id: 'summary',       label: 'Summary' },
+      { re: /translating summary/i,           id: 'translation',   label: 'Translation' },
+      { re: /short summary|tl.?dr/i,          id: 'tldr',          label: 'TL;DR' },
+    ];
+    const EVENT_ENDS = {
+      ffmpeg_done:      ['ffmpeg'],
+      diarization_done: ['diarization'],
+      transcript_done:  ['transcription', 'diarization', 'frames'],
+      cleaned_done:     ['cleaning'],
+      summary_done:     ['summary', 'translation'],
+      tldr_done:        ['tldr'],
+    };
+    // ─────────────────────────────────────────────────────────────────────
+
     const form = document.getElementById('upload-form');
     const fileInput = document.getElementById('file-input');
     const langSelect = document.getElementById('lang-select');
@@ -434,6 +585,7 @@
     const whisperPct  = document.getElementById('whisper-pct-label');
 
     function resetUI() {
+      timerReset();
       errorBanner.style.display = 'none';
       errorBanner.textContent = '';
       ['ffmpeg', 'transcript', 'cleaned', 'summary'].forEach(id => {
@@ -543,11 +695,18 @@
     }
 
     function handleEvent(event, payload) {
+      // timer: end stages mapped to this event
+      (EVENT_ENDS[event] || []).forEach(id => timerStageEnd(id));
+
       switch (event) {
         case 'status':
           setStatus(payload.message);
           if (payload.message.toLowerCase().includes('canary')) {
             startWhisperIndeterminate();
+          }
+          // timer: start stage matching this status message
+          for (const s of STATUS_STAGES) {
+            if (s.re.test(payload.message)) { timerStageStart(s.id, s.label); break; }
           }
           break;
 

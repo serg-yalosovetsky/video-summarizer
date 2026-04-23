@@ -204,7 +204,7 @@ def transcribe_with_canary(
     log.info("  [canary] starting inference (this may take several minutes)...")
     loop.call_soon_threadsafe(async_q.put_nowait, 1)
     try:
-        outputs = model.transcribe(
+        outputs = model.transcribe(  # type: ignore[operator]
             audio=[wav_path],
             source_lang=source_lang,
             target_lang=target_lang,
@@ -224,9 +224,10 @@ def get_diarizer():
     from pyannote.audio import Pipeline
 
     log.info("Loading pyannote diarization model...")
+    model_id = os.environ.get("PYANNOTE_MODEL", "pyannote/speaker-diarization-3.1")
     pipeline = Pipeline.from_pretrained(
-        "pyannote/speaker-diarization-community-1",
-        use_auth_token=HF_TOKEN or True,
+        model_id,
+        token=HF_TOKEN or True,
     )
     log.info("Diarizer ready.")
     return pipeline
@@ -235,10 +236,12 @@ def get_diarizer():
 def run_diarization(wav_path: str) -> list[tuple[float, float, str]]:
     """Return sorted list of (start_sec, end_sec, speaker_id) tuples."""
     pipeline = get_diarizer()
-    diarization = pipeline(wav_path)
+    raw = pipeline(wav_path)
+    # pyannote >= 3.2 returns DiarizeOutput; older/legacy returns Annotation directly
+    annotation = getattr(raw, 'speaker_diarization', None) or getattr(raw, 'diarization', None) or raw
     segments = [
         (turn.start, turn.end, speaker)
-        for turn, _, speaker in diarization.itertracks(yield_label=True)
+        for turn, _, speaker in annotation.itertracks(yield_label=True)
     ]
     return sorted(segments, key=lambda x: x[0])
 

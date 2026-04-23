@@ -23,10 +23,10 @@ fi
 (
   sleep 6
   if command -v xdg-open >/dev/null 2>&1; then
-    xdg-open "http://localhost:8000" >/dev/null 2>&1
+    xdg-open "http://localhost:8888" >/dev/null 2>&1
   elif command -v open >/dev/null 2>&1; then
-    open "http://localhost:8000" >/dev/null 2>&1
+    open "http://localhost:8888" >/dev/null 2>&1
   fi
 ) &
 
-exec "$VENV_DIR/bin/python" -m uvicorn main:app --host 0.0.0.0 --port 8000
+exec "$VENV_DIR/bin/python" -m uvicorn main:app --host 0.0.0.0 --port 8888

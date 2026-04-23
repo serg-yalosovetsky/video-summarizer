@@ -7,7 +7,7 @@ cd "$SCRIPT_DIR"
 PYTHON_VERSION=$(tr -d '\r\n' < "$SCRIPT_DIR/.python-version")
 VENV_DIR="$SCRIPT_DIR/.venv"
 
-CHECK_IMPORTS='import fastapi, httpx, numpy, requests, soundfile, torch, torchaudio, uvicorn; import dotenv; import nemo.collections.asr'
+CHECK_IMPORTS='import fastapi, httpx, numpy, requests, soundfile, torch, torchaudio, uvicorn; import dotenv; import nemo.collections.asr; import pyannote.audio; import desktop_notifier'
 CHECK_CUDA='import os, sys, torch; requested = os.environ.get("CANARY_DEVICE", "cuda").strip().lower(); sys.exit(0 if (requested != "cuda" or torch.cuda.is_available()) else 1)'
 SHOW_TORCH_DIAG='import shutil, torch; print(f"torch={torch.__version__} torch.version.cuda={torch.version.cuda} torch.cuda.is_available()={torch.cuda.is_available()} nvidia-smi={shutil.which(\"nvidia-smi\") is not None}")'
 TORCH_CUDA_INDEX_URL="${TORCH_CUDA_INDEX_URL:-https://download.pytorch.org/whl/cu128}"

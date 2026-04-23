@@ -30,6 +30,6 @@ if errorlevel 1 (
 
 :start_app
 
-start "" /b powershell -NoProfile -WindowStyle Hidden -Command "Start-Sleep -Seconds 10; Start-Process 'http://localhost:8000'"
+start "" /b powershell -NoProfile -WindowStyle Hidden -Command "Start-Sleep -Seconds 10; Start-Process 'http://localhost:8888'"
 
-"%VENV_PYTHON%" -m uvicorn main:app --host 0.0.0.0 --port 8000
+"%VENV_PYTHON%" -m uvicorn main:app --host 0.0.0.0 --port 8888

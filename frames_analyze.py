@@ -11,6 +11,10 @@ import httpx
 from helpers import OLLAMA_MODEL, OLLAMA_URL, log
 from prompts import FRAME_ANALYSIS_PROMPT, FRAME_ANALYSIS_SYSTEM
 
+# Separate vision model for frame analysis — must support images.
+# Set FRAME_MODEL in .env if the main OLLAMA_MODEL is text-only.
+FRAME_MODEL = os.environ.get("FRAME_MODEL") or OLLAMA_MODEL
+
 
 FRAME_TIMESTAMPS = [1, 2, 5, 10]
 MAX_FRAMES = 20
@@ -104,19 +108,34 @@ def is_context_sufficient(context: str) -> bool:
 
 
 def analyze_frame(image_path: str) -> str:
+    img_size = os.path.getsize(image_path)
+    log.info("  [frames] → POST %s  model=%s  image=%s  size=%dKB",
+             OLLAMA_URL, FRAME_MODEL, os.path.basename(image_path), img_size // 1024)
     with open(image_path, "rb") as file_handle:
         b64 = base64.b64encode(file_handle.read()).decode()
-    response = httpx.post(
-        OLLAMA_URL,
-        json={
-            "model": OLLAMA_MODEL,
-            "prompt": FRAME_ANALYSIS_PROMPT,
-            "system": FRAME_ANALYSIS_SYSTEM,
-            "images": [b64],
-            "stream": False,
-        },
-        timeout=120.0,
-    )
+    try:
+        response = httpx.post(
+            OLLAMA_URL,
+            json={
+                "model": FRAME_MODEL,
+                "prompt": FRAME_ANALYSIS_PROMPT,
+                "system": FRAME_ANALYSIS_SYSTEM,
+                "images": [b64],
+                "stream": False,
+            },
+            timeout=120.0,
+        )
+    except httpx.TimeoutException as exc:
+        log.warning("  [frames] ← TIMEOUT after 120s  url=%s  model=%s  exc=%s",
+                    OLLAMA_URL, FRAME_MODEL, exc)
+        raise
+    except httpx.ConnectError as exc:
+        log.warning("  [frames] ← CONNECT ERROR  url=%s  exc=%s", OLLAMA_URL, exc)
+        raise
+    log.info("  [frames] ← HTTP %d  (%.2fs)", response.status_code,
+             response.elapsed.total_seconds())
+    if not response.is_success:
+        log.warning("  [frames] ← error body: %s", response.text[:500])
     response.raise_for_status()
     return response.json()["response"]
 

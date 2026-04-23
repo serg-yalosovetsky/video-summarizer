@@ -11,7 +11,52 @@ from fastapi import FastAPI, File, Form, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
+import sentry_sdk
+
+from helpers import is_benign_nemo_transformer_log
+
+
+def _message_from_sentry_payload(payload: dict | None) -> str:
+    if not payload:
+        return ""
+    logentry = payload.get("logentry") or {}
+    if isinstance(logentry, dict):
+        formatted = logentry.get("formatted")
+        message = logentry.get("message")
+        if isinstance(formatted, str) and formatted:
+            return formatted
+        if isinstance(message, str) and message:
+            return message
+    message = payload.get("message")
+    return message if isinstance(message, str) else ""
+
+
+def _before_send(event, hint):
+    if is_benign_nemo_transformer_log(_message_from_sentry_payload(event)):
+        return None
+    return event
+
+
+def _before_breadcrumb(crumb, hint):
+    if is_benign_nemo_transformer_log(_message_from_sentry_payload(crumb)):
+        return None
+    return crumb
+
+
+sentry_sdk.init(
+    dsn="https://cd075bbd8f1c11d4083f523e8eba375e@o4504272346480640.ingest.us.sentry.io/4511266802106368",
+    # Add data like request headers and IP for users,
+    # see https://docs.sentry.io/platforms/python/data-management/data-collected/ for more info
+    send_default_pii=True,
+    sample_rate=1.0,  # Adjust this value in production to control the volume of events sent to Sentry
+    enable_tracing=True,  # Enable performance monitoring
+    traces_sample_rate=1,  # Adjust this value in production to control the
+    before_send=_before_send,
+    before_breadcrumb=_before_breadcrumb,
+)
+
 from frames_analyze import (
+    FRAME_MODEL,
     FRAME_TIMESTAMPS,
     MAX_FRAMES,
     analyze_frames_with_progress,
@@ -20,7 +65,18 @@ from frames_analyze import (
     generate_frame_timestamps,
     is_context_sufficient,
 )
-from helpers import LOCAL_TMP, MAX_UPLOAD_BYTES, combine_sources, log, notify_done, remove_repetitions, sse, tail_text
+from helpers import (
+    LOCAL_TMP,
+    MAX_UPLOAD_BYTES,
+    OLLAMA_MODEL,
+    combine_sources,
+    ensure_ollama_ready,
+    log,
+    notify_done,
+    remove_repetitions,
+    sse,
+    tail_text,
+)
 from summary import (
     classify_is_meeting,
     classify_text_language,
@@ -426,6 +482,13 @@ async def process_generator(
 @asynccontextmanager
 async def lifespan(app):
     loop = asyncio.get_event_loop()
+    log.info(
+        "Checking Ollama at startup (text=%s, frames=%s)...",
+        OLLAMA_MODEL,
+        FRAME_MODEL,
+    )
+    await loop.run_in_executor(None, ensure_ollama_ready, OLLAMA_MODEL, FRAME_MODEL)
+    log.info("Ollama ready — service accepting requests.")
     log.info("Pre-loading Canary model at startup...")
     await loop.run_in_executor(None, get_canary_model)
     log.info("Canary model ready — service accepting requests.")
