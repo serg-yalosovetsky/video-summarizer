@@ -5,7 +5,7 @@ import os
 import re
 
 from config import settings
-from helpers import call_ollama, load_user_profile
+from helpers import call_ollama, load_user_profile, log
 from pydantic import BaseModel, Field
 from prompts import (
     CLEAN_PROMPT_TEMPLATE,
@@ -71,6 +71,48 @@ SUMMARY_RETRY_MIN_TOKENS = 8192
 TLDR_RETRY_MIN_TOKENS = 4096
 _JSON_FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)```", re.IGNORECASE | re.DOTALL)
 _TIMESTAMP_VALUE_RE = re.compile(r"^\d{2}:\d{2}:\d{2}$")
+_TODO_REWRITE_SENTINEL = "NO_CONTEXT"
+_TODO_REWRITE_MAX_ITEMS = 12
+_TODO_REWRITE_LINE_WINDOW = 4
+_TODO_REWRITE_OPTIONS = {
+    **OLLAMA_FAST_OPTIONS,
+    "num_predict": 128,
+}
+_SPEAKER_LINE_PATTERNS = (
+    re.compile(r"^\[\d{2}:\d{2}:\d{2}\]\s*\[([^\]\n]+)\]\s*(?:→|:)"),
+    re.compile(r"^\[([^\]\n]+)\]\s*(?:→|:)"),
+)
+_LEADING_TODO_PREFIX_RE = re.compile(
+    r"^(?:task|action|rewritten task|rewritten action|result)\s*:\s*",
+    re.IGNORECASE,
+)
+_TIMESTAMP_ANYWHERE_RE = re.compile(r"\[\d{2}:\d{2}:\d{2}\]\s*")
+_LEADING_SPEAKER_TAG_RE = re.compile(r"^\[[^\]\n]+\]\s*(?:→|:)\s*")
+_MULTI_SENTENCE_SPLIT_RE = re.compile(r"(?<=[.!?])\s+(?=[^\s])")
+_TODO_REWRITE_SYSTEM = (
+    "You rewrite one extracted task into a single self-contained sentence. "
+    "Use the nearby transcript context to resolve vague references. "
+    "Answer in the same language as the transcript. "
+    f"If the context is still insufficient, reply with exactly { _TODO_REWRITE_SENTINEL }."
+)
+_TODO_REWRITE_PROMPT_TEMPLATE = (
+    "Rewrite the extracted action item into one self-contained sentence.\n\n"
+    "Rules:\n"
+    "- Output exactly one sentence\n"
+    "- Remove timestamps and speaker labels\n"
+    "- Keep the same language as the transcript\n"
+    "- Include the missing object, topic, or deliverable if the nearby context reveals it\n"
+    f"- If the context is still not enough, output exactly { _TODO_REWRITE_SENTINEL }\n"
+    "- Do not add explanations\n\n"
+    "Target person: {user_name}\n"
+    "Original extracted action: {action}\n"
+    "Task timestamp: {timestamp}\n"
+    "Task assigner: {assigner}\n\n"
+    "Nearby transcript context:\n"
+    "---\n"
+    "{context}\n"
+    "---"
+)
 
 
 class PersonalTodoItem(BaseModel):
@@ -487,6 +529,243 @@ def _render_personal_todo(response: PersonalTodoResponse, *, user_name: str) -> 
     return f"Задач для {user_name} не найдено."
 
 
+def _normalize_speaker_name(value: str) -> str:
+    return " ".join(str(value or "").strip().strip("[]").split()).casefold()
+
+
+def extract_speakers_in_order(transcript: str) -> list[str]:
+    speakers: list[str] = []
+    seen: set[str] = set()
+    for raw_line in (transcript or "").splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        for pattern in _SPEAKER_LINE_PATTERNS:
+            match = pattern.match(line)
+            if not match:
+                continue
+            speaker = " ".join(match.group(1).strip().split())
+            key = _normalize_speaker_name(speaker)
+            if speaker and key and key not in seen and not _TIMESTAMP_VALUE_RE.fullmatch(speaker):
+                speakers.append(speaker)
+                seen.add(key)
+            break
+    return speakers
+
+
+def resolve_default_todo_speaker(transcript: str) -> str:
+    user_profile = load_user_profile()
+    alias_keys = {
+        _normalize_speaker_name(alias)
+        for alias in [user_profile["primary_name"], *user_profile["aliases"]]
+        if str(alias).strip()
+    }
+    for speaker in extract_speakers_in_order(transcript):
+        if _normalize_speaker_name(speaker) in alias_keys:
+            return speaker
+    return user_profile["primary_name"]
+
+
+def _next_speaker_in_order(speakers: list[str], current_speaker: str | None) -> str | None:
+    if not speakers:
+        return None
+    if not current_speaker:
+        return speakers[0]
+    current_key = _normalize_speaker_name(current_speaker)
+    for index, speaker in enumerate(speakers):
+        if _normalize_speaker_name(speaker) == current_key:
+            return speakers[(index + 1) % len(speakers)]
+    return speakers[0]
+
+
+def _todo_context_excerpt(transcript: str, timestamp: str) -> str:
+    timestamp_token = f"[{timestamp}]"
+    lines = [line.strip() for line in (transcript or "").splitlines() if line.strip()]
+    if not lines:
+        return ""
+    line_index = next((idx for idx, line in enumerate(lines) if timestamp_token in line), None)
+    if line_index is None:
+        return ""
+    start = max(0, line_index - _TODO_REWRITE_LINE_WINDOW)
+    end = min(len(lines), line_index + _TODO_REWRITE_LINE_WINDOW + 1)
+    context_lines = []
+    for idx in range(start, end):
+        prefix = "TARGET" if idx == line_index else "CTX"
+        context_lines.append(f"{prefix}: {lines[idx]}")
+    return "\n".join(context_lines)
+
+
+def _clean_rewritten_todo_action(text: str) -> str:
+    cleaned = (text or "").strip()
+    cleaned = re.sub(r"^```(?:text|markdown)?\s*", "", cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r"\s*```$", "", cleaned)
+    cleaned = cleaned.replace("\r", "\n")
+    cleaned = " ".join(part.strip() for part in cleaned.splitlines() if part.strip())
+    cleaned = cleaned.strip(" \"'")
+    cleaned = _LEADING_TODO_PREFIX_RE.sub("", cleaned)
+    cleaned = _TIMESTAMP_ANYWHERE_RE.sub("", cleaned)
+    cleaned = _LEADING_SPEAKER_TAG_RE.sub("", cleaned)
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" ,;:-")
+    if not cleaned or cleaned.upper() == _TODO_REWRITE_SENTINEL:
+        return ""
+
+    parts = [part.strip().rstrip(".!?") for part in _MULTI_SENTENCE_SPLIT_RE.split(cleaned) if part.strip()]
+    if not parts:
+        return ""
+    if len(parts) > 1:
+        cleaned = ", ".join(parts)
+    else:
+        cleaned = parts[0]
+
+    cleaned = re.sub(r"\s+", " ", cleaned).strip(" ,;:-")
+    if not cleaned:
+        return ""
+    if cleaned[-1] not in ".!?":
+        cleaned += "."
+    return cleaned
+
+
+def _rewrite_personal_todo_item(
+    transcript: str,
+    item: PersonalTodoItem,
+    *,
+    user_name: str,
+    options_override: dict | None = None,
+) -> str:
+    timestamp = str(item.timestamp or "").strip().strip("[]")
+    assigner = _clean_structured_text(str(item.assigner or "").strip().strip("[]"), min_chars=1)
+    action = _clean_structured_text(item.action, min_chars=6)
+    if not _TIMESTAMP_VALUE_RE.fullmatch(timestamp) or not assigner or not action:
+        return ""
+
+    context_excerpt = _todo_context_excerpt(transcript, timestamp)
+    if not context_excerpt:
+        return ""
+
+    prompt = _TODO_REWRITE_PROMPT_TEMPLATE.format(
+        user_name=user_name,
+        action=action,
+        timestamp=timestamp,
+        assigner=assigner,
+        context=context_excerpt,
+    )
+    opts = {**_TODO_REWRITE_OPTIONS, **(options_override or {})}
+    try:
+        raw = call_ollama(prompt, _TODO_REWRITE_SYSTEM, options=opts)
+    except Exception as exc:
+        log.warning("Todo rewrite failed for %s @ %s: %s", user_name, timestamp, exc)
+        return ""
+    return _clean_rewritten_todo_action(raw)
+
+
+def _render_rewritten_personal_todo(
+    response: PersonalTodoResponse,
+    *,
+    transcript: str,
+    user_name: str,
+    options_override: dict | None = None,
+) -> str:
+    lines: list[str] = []
+    seen: set[str] = set()
+    for item in response.items[:_TODO_REWRITE_MAX_ITEMS]:
+        rewritten = _rewrite_personal_todo_item(
+            transcript,
+            item,
+            user_name=user_name,
+            options_override=options_override,
+        )
+        if not rewritten:
+            continue
+        rendered = f"- {rewritten}"
+        if rendered in seen:
+            continue
+        lines.append(rendered)
+        seen.add(rendered)
+    if lines:
+        return "\n".join(lines)
+    return f"Задач для {user_name} не найдено."
+
+
+def _generate_personal_todo_response(
+    transcript: str,
+    *,
+    user_name: str,
+    user_aliases: list[str],
+    options_override: dict | None = None,
+) -> PersonalTodoResponse:
+    prompt = PERSONAL_TODO_PROMPT_TEMPLATE.format(
+        transcript=transcript,
+        user_name=user_name,
+        user_aliases=", ".join(user_aliases),
+    )
+    opts = {**OLLAMA_SUMMARY_OPTIONS, **(options_override or {})}
+    try:
+        raw = call_ollama(
+            prompt,
+            PERSONAL_TODO_SYSTEM,
+            options=opts,
+            format=PERSONAL_TODO_SCHEMA,
+        )
+        return _parse_structured_response(raw, PersonalTodoResponse)
+    except ValueError:
+        raw = call_ollama(
+            prompt,
+            PERSONAL_TODO_SYSTEM,
+            options=opts,
+        )
+        return _parse_structured_response(raw, PersonalTodoResponse)
+
+
+def generate_personal_todo_for_target(
+    transcript: str,
+    *,
+    user_name: str,
+    user_aliases: list[str] | tuple[str, ...] | None = None,
+    options_override: dict | None = None,
+) -> str:
+    transcript = local_preclean_content(transcript)
+    aliases = [str(alias).strip() for alias in (user_aliases or [user_name]) if str(alias).strip()]
+    if user_name not in aliases:
+        aliases.insert(0, user_name)
+    response = _generate_personal_todo_response(
+        transcript,
+        user_name=user_name,
+        user_aliases=aliases,
+        options_override=options_override,
+    )
+    return _render_rewritten_personal_todo(
+        response,
+        transcript=transcript,
+        user_name=user_name,
+        options_override=options_override,
+    )
+
+
+def generate_next_speaker_todo(
+    transcript: str,
+    *,
+    current_speaker: str | None = None,
+    options_override: dict | None = None,
+) -> dict[str, object]:
+    transcript = local_preclean_content(transcript)
+    speakers = extract_speakers_in_order(transcript)
+    next_speaker = _next_speaker_in_order(speakers, current_speaker)
+    if not next_speaker:
+        next_speaker = resolve_default_todo_speaker(transcript)
+        speakers = [next_speaker]
+    text = generate_personal_todo_for_target(
+        transcript,
+        user_name=next_speaker,
+        user_aliases=[next_speaker],
+        options_override=options_override,
+    )
+    return {
+        "text": text,
+        "speaker_name": next_speaker,
+        "speakers": speakers,
+    }
+
+
 def count_timestamps(text: str) -> int:
     return len(TIMESTAMP_RE.findall(text or ""))
 
@@ -645,32 +924,13 @@ def generate_personal_todo(
     *,
     options_override: dict | None = None,
 ) -> str:
-    transcript = local_preclean_content(transcript)
     user_profile = load_user_profile()
-    prompt = PERSONAL_TODO_PROMPT_TEMPLATE.format(
-        transcript=transcript,
+    return generate_personal_todo_for_target(
+        transcript,
         user_name=user_profile["primary_name"],
-        user_aliases=", ".join(user_profile["aliases"]),
+        user_aliases=user_profile["aliases"],
+        options_override=options_override,
     )
-    opts = {**OLLAMA_SUMMARY_OPTIONS, **(options_override or {})}
-    try:
-        raw = call_ollama(
-            prompt,
-            PERSONAL_TODO_SYSTEM,
-            options=opts,
-            format=PERSONAL_TODO_SCHEMA,
-        )
-        response = _parse_structured_response(raw, PersonalTodoResponse)
-    except ValueError:
-        # Some Ollama/model combinations fail on nested referenced schemas or return
-        # empty output for structured mode; retry with prompt-only JSON instructions.
-        raw = call_ollama(
-            prompt,
-            PERSONAL_TODO_SYSTEM,
-            options=opts,
-        )
-        response = _parse_structured_response(raw, PersonalTodoResponse)
-    return _render_personal_todo(response, user_name=user_profile["primary_name"])
 
 
 def detect_language_heuristically(text: str) -> str:

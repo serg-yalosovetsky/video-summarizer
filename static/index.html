@@ -133,6 +133,29 @@
     button#submit-btn:hover:not(:disabled) { background: var(--accent-hover); }
     button#submit-btn:disabled { opacity: 0.5; cursor: not-allowed; }
 
+    .secondary-btn {
+      background: transparent;
+      color: var(--text);
+      border: 1px solid var(--border);
+      padding: 0.45rem 0.9rem;
+      border-radius: 6px;
+      font-size: 0.82rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: border-color 0.2s, color 0.2s, background 0.2s;
+    }
+
+    .secondary-btn:hover:not(:disabled) {
+      color: #fff;
+      background: rgba(255,255,255,0.03);
+      border-color: var(--accent);
+    }
+
+    .secondary-btn:disabled {
+      opacity: 0.5;
+      cursor: not-allowed;
+    }
+
     /* Progress */
     #progress {
       display: flex;
@@ -300,6 +323,21 @@
       padding-top: 0.9rem;
       font-size: 0.92rem;
       line-height: 1.7;
+    }
+
+    #todo-controls {
+      display: flex;
+      align-items: center;
+      gap: 0.75rem;
+      flex-wrap: wrap;
+      margin-bottom: 0.35rem;
+    }
+
+    #todo-current-speaker {
+      color: var(--text-muted);
+      font-size: 0.82rem;
+      font-weight: 600;
+      letter-spacing: 0.02em;
     }
 
     .summary-section + .summary-section {
@@ -602,6 +640,10 @@
     <!-- Short summary card (~10% of summary) -->
     <div id="tldr-card" style="display:none; background:var(--surface); border:1px solid var(--accent); border-radius:var(--radius); padding:1.1rem 1.3rem; animation: fadeIn 0.3s ease;">
       <div id="tldr-title" style="font-size:0.75rem;font-weight:700;color:var(--accent);text-transform:uppercase;letter-spacing:0.07em;margin-bottom:0.5rem;">Краткое саммари</div>
+      <div id="todo-controls" style="display:none">
+        <div id="todo-current-speaker"></div>
+        <button type="button" id="todo-next-speaker-btn" class="secondary-btn">Следующий спикер</button>
+      </div>
       <div id="content-tldr" class="summary-content"></div>
     </div>
   </main>
@@ -710,13 +752,96 @@
     const progressEl = document.getElementById('progress');
     const statusMsg = document.getElementById('status-msg');
     const errorBanner = document.getElementById('error-banner');
+    const tldrCard = document.getElementById('tldr-card');
+    const tldrTitle = document.getElementById('tldr-title');
+    const tldrContent = document.getElementById('content-tldr');
+    const todoControls = document.getElementById('todo-controls');
+    const todoCurrentSpeaker = document.getElementById('todo-current-speaker');
+    const todoNextSpeakerBtn = document.getElementById('todo-next-speaker-btn');
 
     const whisperWrap = document.getElementById('whisper-progress-wrap');
     const whisperFill = document.getElementById('whisper-bar-fill');
     const whisperPct  = document.getElementById('whisper-pct-label');
+    let todoState = {
+      transcript: '',
+      speakers: [],
+      currentSpeaker: '',
+      baseTitle: 'Краткое саммари',
+      loading: false,
+    };
+
+    function resetTodoState() {
+      todoState = {
+        transcript: '',
+        speakers: [],
+        currentSpeaker: '',
+        baseTitle: 'Краткое саммари',
+        loading: false,
+      };
+      todoControls.style.display = 'none';
+      todoCurrentSpeaker.textContent = '';
+      todoNextSpeakerBtn.disabled = false;
+      todoNextSpeakerBtn.textContent = 'Следующий спикер';
+    }
+
+    function renderTodoControls() {
+      const hasTodoTranscript = Boolean(todoState.transcript);
+      if (!hasTodoTranscript) {
+        todoControls.style.display = 'none';
+        tldrTitle.textContent = todoState.baseTitle || 'Краткое саммари';
+        return;
+      }
+
+      tldrTitle.textContent = todoState.currentSpeaker
+        ? `ToDo для ${todoState.currentSpeaker}`
+        : (todoState.baseTitle || 'ToDo');
+      todoCurrentSpeaker.textContent = todoState.currentSpeaker
+        ? `Текущий спикер: ${todoState.currentSpeaker}`
+        : 'Текущий спикер не определён';
+
+      const canCycle = todoState.speakers.length > 1;
+      todoNextSpeakerBtn.style.display = canCycle ? '' : 'none';
+      todoNextSpeakerBtn.disabled = todoState.loading || !canCycle;
+      todoControls.style.display = '';
+    }
+
+    todoNextSpeakerBtn.addEventListener('click', async () => {
+      if (!todoState.transcript || todoState.loading) return;
+
+      todoState.loading = true;
+      todoNextSpeakerBtn.textContent = 'Генерирую...';
+      renderTodoControls();
+
+      try {
+        const response = await fetch('/todo/next', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            transcript: todoState.transcript,
+            current_speaker: todoState.currentSpeaker,
+          }),
+        });
+        const payload = await response.json();
+        if (!response.ok) {
+          throw new Error(payload.detail || 'Failed to switch speaker.');
+        }
+
+        todoState.currentSpeaker = payload.speaker_name || '';
+        todoState.speakers = Array.isArray(payload.speakers) ? payload.speakers : todoState.speakers;
+        tldrContent.innerHTML = renderMarkdown(payload.text || '');
+      } catch (error) {
+        errorBanner.style.display = '';
+        errorBanner.textContent = `Не удалось переключить спикера: ${error.message}`;
+      } finally {
+        todoState.loading = false;
+        todoNextSpeakerBtn.textContent = 'Следующий спикер';
+        renderTodoControls();
+      }
+    });
 
     function resetUI() {
       timerReset();
+      resetTodoState();
       errorBanner.style.display = 'none';
       errorBanner.textContent = '';
       ['ffmpeg', 'transcript', 'frames', 'cleaned', 'summary'].forEach(id => {
@@ -734,9 +859,9 @@
       document.getElementById('cleaned-download-wrap').style.display = 'none';
       document.getElementById('cleaned-download-link').href = '';
       document.getElementById('cleaned-download-link').removeAttribute('download');
-      document.getElementById('tldr-card').style.display = 'none';
-      document.getElementById('tldr-title').textContent = 'Краткое саммари';
-      document.getElementById('content-tldr').textContent = '';
+      tldrCard.style.display = 'none';
+      tldrTitle.textContent = 'Краткое саммари';
+      tldrContent.textContent = '';
       // hide transcript spoiler if no video was submitted
       document.getElementById('spoiler-transcript').style.display = 'none';
       whisperWrap.style.display = 'none';
@@ -908,10 +1033,13 @@
         }
 
         case 'tldr_done': {
-          const card = document.getElementById('tldr-card');
-          card.style.display = '';
-          document.getElementById('tldr-title').textContent = payload.title || 'Краткое саммари';
-          document.getElementById('content-tldr').innerHTML = renderMarkdown(payload.text);
+          tldrCard.style.display = '';
+          todoState.baseTitle = payload.title || 'Краткое саммари';
+          todoState.transcript = payload.is_meeting ? (payload.todo_source_text || '') : '';
+          todoState.speakers = Array.isArray(payload.todo_speakers) ? payload.todo_speakers : [];
+          todoState.currentSpeaker = payload.is_meeting ? (payload.todo_current_speaker || '') : '';
+          tldrContent.innerHTML = renderMarkdown(payload.text);
+          renderTodoControls();
           break;
         }
 

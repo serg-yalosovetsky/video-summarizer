@@ -1263,6 +1263,13 @@ class SummaryHelperTests(unittest.TestCase):
         self.assertEqual(result, "Brief recap.\n- First point.\n- Second point.")
 
     def test_generate_personal_todo_renders_structured_json(self):
+        transcript = "\n".join(
+            [
+                "[00:12:10] [Alice] → У нас продовый деплой упал на логах.",
+                "[00:12:34] [Alice] → Проверить логи и прислать статус в общий чат.",
+                "[00:12:50] [Bob] → Потом решим, нужен ли хотфикс.",
+            ]
+        )
         raw = json.dumps(
             {
                 "items": [
@@ -1278,16 +1285,36 @@ class SummaryHelperTests(unittest.TestCase):
 
         with (
             mock.patch.object(summary, "load_user_profile", return_value={"primary_name": "Сергей", "aliases": ["Сергей"]}),
-            mock.patch.object(summary, "call_ollama", return_value=raw) as call_ollama,
+            mock.patch.object(
+                summary,
+                "call_ollama",
+                side_effect=[
+                    raw,
+                    "Проверить логи продового деплоя и прислать статус в общий чат.",
+                ],
+            ) as call_ollama,
         ):
-            result = summary.generate_personal_todo("Meeting transcript")
+            result = summary.generate_personal_todo(transcript)
 
-        self.assertEqual(result, "- [00:12:34] [Alice] → Проверить логи и прислать статус в общий чат.")
-        self.assertIn('"items": [{"timestamp": "HH:MM:SS", "assigner": "Name", "action": "Concrete action sentence."}]', call_ollama.call_args.args[0])
-        self.assertIn('return exactly: {"items": []}', call_ollama.call_args.args[0])
-        self.assertEqual(call_ollama.call_args.kwargs["format"], summary.PERSONAL_TODO_SCHEMA)
+        self.assertEqual(result, "- Проверить логи продового деплоя и прислать статус в общий чат.")
+        self.assertEqual(call_ollama.call_count, 2)
+        self.assertIn(
+            '"items": [{"timestamp": "HH:MM:SS", "assigner": "Name", "action": "Concrete action sentence."}]',
+            call_ollama.call_args_list[0].args[0],
+        )
+        self.assertIn('return exactly: {"items": []}', call_ollama.call_args_list[0].args[0])
+        self.assertEqual(call_ollama.call_args_list[0].kwargs["format"], summary.PERSONAL_TODO_SCHEMA)
+        self.assertIn("Task timestamp: 00:12:34", call_ollama.call_args_list[1].args[0])
+        self.assertNotIn("format", call_ollama.call_args_list[1].kwargs)
 
     def test_generate_personal_todo_retries_without_schema_when_structured_call_returns_empty(self):
+        transcript = "\n".join(
+            [
+                "[00:14:40] [SPEAKER_02] → We still have an open architecture question.",
+                "[00:14:58] [SPEAKER_02] → Look into the Fastify versus FastAPI architecture question and report back.",
+                "[00:15:15] [SPEAKER_01] → We need the recommendation before the next sync.",
+            ]
+        )
         raw = json.dumps(
             {
                 "items": [
@@ -1303,15 +1330,23 @@ class SummaryHelperTests(unittest.TestCase):
 
         with (
             mock.patch.object(summary, "load_user_profile", return_value={"primary_name": "Сергей", "aliases": ["Сергей", "SY"]}),
-            mock.patch.object(summary, "call_ollama", side_effect=["", raw]) as call_ollama,
+            mock.patch.object(
+                summary,
+                "call_ollama",
+                side_effect=[
+                    "",
+                    raw,
+                    "Look into whether the service should keep Fastify or move to FastAPI and report back.",
+                ],
+            ) as call_ollama,
         ):
-            result = summary.generate_personal_todo("Meeting transcript")
+            result = summary.generate_personal_todo(transcript)
 
         self.assertEqual(
             result,
-            "- [00:14:58] [SPEAKER_02] → Look into the Fastify versus FastAPI architecture question and report back.",
+            "- Look into whether the service should keep Fastify or move to FastAPI and report back.",
         )
-        self.assertEqual(call_ollama.call_count, 2)
+        self.assertEqual(call_ollama.call_count, 3)
         self.assertEqual(call_ollama.call_args_list[0].kwargs["format"], summary.PERSONAL_TODO_SCHEMA)
         self.assertNotIn("format", call_ollama.call_args_list[1].kwargs)
 
@@ -1323,6 +1358,65 @@ class SummaryHelperTests(unittest.TestCase):
             result = summary.generate_personal_todo("Meeting transcript")
 
         self.assertEqual(result, "Задач для Сергей не найдено.")
+
+    def test_generate_personal_todo_drops_item_when_rewrite_has_no_context(self):
+        transcript = "\n".join(
+            [
+                "[00:27:30] [SY] → Let me talk to Pavlo.",
+                "[00:27:50] [AB] → Okay.",
+            ]
+        )
+        raw = json.dumps(
+            {
+                "items": [
+                    {
+                        "timestamp": "00:27:30",
+                        "assigner": "SY",
+                        "action": "Let me talk to Pavlo.",
+                    }
+                ]
+            }
+        )
+
+        with (
+            mock.patch.object(summary, "load_user_profile", return_value={"primary_name": "Сергей", "aliases": ["Сергей", "SY"]}),
+            mock.patch.object(summary, "call_ollama", side_effect=[raw, "NO_CONTEXT"]),
+        ):
+            result = summary.generate_personal_todo(transcript)
+
+        self.assertEqual(result, "Задач для Сергей не найдено.")
+
+    def test_extract_speakers_in_order_preserves_first_seen_order(self):
+        transcript = "\n".join(
+            [
+                "[00:01:00] [SY] → First update.",
+                "[00:01:10] [Pavlo] → Second update.",
+                "[00:01:20] [SY] → Follow-up.",
+                "[Masha]: Final note.",
+            ]
+        )
+
+        self.assertEqual(summary.extract_speakers_in_order(transcript), ["SY", "Pavlo", "Masha"])
+
+    def test_generate_next_speaker_todo_cycles_by_transcript_order(self):
+        transcript = "\n".join(
+            [
+                "[00:01:00] [SY] → First update.",
+                "[00:01:10] [Pavlo] → Second update.",
+                "[00:01:20] [Masha] → Third update.",
+            ]
+        )
+
+        with mock.patch.object(
+            summary,
+            "generate_personal_todo_for_target",
+            side_effect=lambda transcript, *, user_name, user_aliases, options_override=None: f"todo for {user_name}",
+        ):
+            result = summary.generate_next_speaker_todo(transcript, current_speaker="SY")
+
+        self.assertEqual(result["speaker_name"], "Pavlo")
+        self.assertEqual(result["speakers"], ["SY", "Pavlo", "Masha"])
+        self.assertEqual(result["text"], "todo for Pavlo")
 
     def test_personal_todo_schema_is_inline_for_ollama(self):
         self.assertNotIn("$defs", summary.PERSONAL_TODO_SCHEMA)

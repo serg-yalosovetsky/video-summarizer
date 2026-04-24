@@ -6,9 +6,10 @@ import time
 from pathlib import Path
 
 from config import settings
-from fastapi import FastAPI, File, Form, UploadFile
+from fastapi import FastAPI, File, Form, HTTPException, UploadFile
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
+from pydantic import BaseModel
 
 import sentry_sdk
 
@@ -82,7 +83,9 @@ from summary import (
     clean_content,
     evaluate_speaker_context,
     build_quality_report,
+    extract_speakers_in_order,
     filter_reliable_context,
+    generate_next_speaker_todo,
     substitute_speaker_names,
     generate_personal_todo,
     generate_short_summary,
@@ -91,6 +94,7 @@ from summary import (
     looks_like_missing_content_response,
     looks_truncated_response,
     prefer_meaningful_content,
+    resolve_default_todo_speaker,
     SUMMARY_RETRY_MIN_TOKENS,
     TLDR_RETRY_MIN_TOKENS,
     translate_summary_to_russian,
@@ -145,6 +149,11 @@ def _wav_meta_payload(meta: dict | WavConversionResult) -> dict:
     return meta
 
 
+class NextSpeakerTodoRequest(BaseModel):
+    transcript: str
+    current_speaker: str = ""
+
+
 async def process_generator(
     file: UploadFile | None,
     chat_text: str,
@@ -171,6 +180,8 @@ async def process_generator(
         generate_summary=generate_summary,
         generate_short_summary=generate_short_summary,
         generate_personal_todo=generate_personal_todo,
+        extract_speakers_in_order=extract_speakers_in_order,
+        resolve_default_todo_speaker=resolve_default_todo_speaker,
         translate_summary_to_russian=translate_summary_to_russian,
         summary_retry_min_tokens=SUMMARY_RETRY_MIN_TOKENS,
         tldr_retry_min_tokens=TLDR_RETRY_MIN_TOKENS,
@@ -263,3 +274,17 @@ async def process_media(
             "X-Accel-Buffering": "no",
         },
     )
+
+
+@app.post("/todo/next")
+async def todo_next(request: NextSpeakerTodoRequest):
+    transcript = (request.transcript or "").strip()
+    if not transcript:
+        raise HTTPException(status_code=400, detail="Transcript is required.")
+    try:
+        return generate_next_speaker_todo(
+            transcript,
+            current_speaker=request.current_speaker,
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to generate ToDo: {exc}") from exc

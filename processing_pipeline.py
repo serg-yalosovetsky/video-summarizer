@@ -69,6 +69,8 @@ class PipelineDeps:
     generate_summary: Callable[..., str]
     generate_short_summary: Callable[..., str]
     generate_personal_todo: Callable[..., str]
+    extract_speakers_in_order: Callable[[str], list[str]]
+    resolve_default_todo_speaker: Callable[[str], str]
     translate_summary_to_russian: Callable[[str], str]
     summary_retry_min_tokens: int
     tldr_retry_min_tokens: int
@@ -866,6 +868,11 @@ async def _summary_and_tldr_step(
     summary_input = deps.prefer_meaningful_content(state.cleaned_text, combined)
     if summary_input != state.cleaned_text:
         deps.log.warning("  [gemma/summary] cleaned text unusable; falling back to combined source")
+    todo_speakers: list[str] = []
+    todo_current_speaker = ""
+    if state.is_meeting:
+        todo_speakers = deps.extract_speakers_in_order(summary_input)
+        todo_current_speaker = deps.resolve_default_todo_speaker(summary_input)
 
     try:
         state.summary_text = await _generate_summary_text(loop, summary_input, is_meeting=state.is_meeting, root_span=root_span, deps=deps)
@@ -942,6 +949,9 @@ async def _summary_and_tldr_step(
             "text": state.tldr_text,
             "title": state.tldr_title,
             "is_meeting": state.is_meeting,
+            "todo_source_text": summary_input if state.is_meeting else "",
+            "todo_speakers": todo_speakers,
+            "todo_current_speaker": todo_current_speaker,
         },
     )
 
