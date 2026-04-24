@@ -200,6 +200,7 @@ async def process_generator(
             settings.ollama_clean_model,
             settings.frame_model,
         ),
+        unload_clean_model=lambda: unload_ollama_models(settings.ollama_clean_model),
     )
     async for event in process_generator_impl(file, chat_text, source_lang, deps=deps):
         yield event

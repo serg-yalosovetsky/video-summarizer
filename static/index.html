@@ -470,11 +470,11 @@
     }
 
     .scroll-btn {
-      width: 36px;
-      height: 36px;
+      width: 26px;
+      height: 44px;
       background: rgba(15, 17, 23, 0.94);
       border: 1px solid var(--border);
-      border-radius: 8px;
+      border-radius: 10px;
       color: var(--text-muted);
       cursor: pointer;
       display: flex;
@@ -492,10 +492,6 @@
       border-color: var(--accent);
     }
 
-    .scroll-btn.active {
-      border-color: var(--accent);
-      color: var(--accent);
-    }
   </style>
 </head>
 <body>
@@ -928,41 +924,39 @@
     }
 
     // ── Scroll navigation ──────────────────────────────────────────────────
-    let _scrollSaved = null;
-    let _scrollLastAction = null;
     const scrollUpBtn = document.getElementById('scroll-up-btn');
     const scrollDownBtn = document.getElementById('scroll-down-btn');
+    let _upSaved = null;
+    let _downSaved = null;
+
+    function updateScrollNavVisibility() {
+      const needsScroll = document.body.scrollHeight > window.innerHeight + 4;
+      document.getElementById('scroll-nav').style.display = needsScroll ? 'flex' : 'none';
+    }
+    window.addEventListener('resize', updateScrollNavVisibility);
+    new MutationObserver(updateScrollNavVisibility).observe(document.body, { childList: true, subtree: true, characterData: true });
+    updateScrollNavVisibility();
 
     scrollUpBtn.addEventListener('click', () => {
-      if (_scrollLastAction === 'down') {
-        const target = _scrollSaved;
-        _scrollSaved = null;
-        _scrollLastAction = 'up-return';
-        scrollUpBtn.classList.remove('active');
-        scrollDownBtn.classList.remove('active');
+      if (_upSaved !== null) {
+        const target = _upSaved;
+        _upSaved = null;
         window.scrollTo({ top: target, behavior: 'smooth' });
       } else {
-        _scrollSaved = window.scrollY;
-        _scrollLastAction = 'up';
-        scrollUpBtn.classList.add('active');
-        scrollDownBtn.classList.remove('active');
+        _upSaved = window.scrollY;
+        _downSaved = null;
         window.scrollTo({ top: 0, behavior: 'smooth' });
       }
     });
 
     scrollDownBtn.addEventListener('click', () => {
-      if (_scrollLastAction === 'up') {
-        const target = _scrollSaved;
-        _scrollSaved = null;
-        _scrollLastAction = 'down-return';
-        scrollDownBtn.classList.remove('active');
-        scrollUpBtn.classList.remove('active');
+      if (_downSaved !== null) {
+        const target = _downSaved;
+        _downSaved = null;
         window.scrollTo({ top: target, behavior: 'smooth' });
       } else {
-        _scrollSaved = window.scrollY;
-        _scrollLastAction = 'down';
-        scrollDownBtn.classList.add('active');
-        scrollUpBtn.classList.remove('active');
+        _downSaved = window.scrollY;
+        _upSaved = null;
         window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' });
       }
     });

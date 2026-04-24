@@ -94,6 +94,7 @@ class PipelineDeps:
     release_canary: Callable[[], None]
     release_diarizer: Callable[[], None]
     unload_ollama: Callable[[], None]
+    unload_clean_model: Callable[[], None]
 
 
 async def _run_in_executor_traced(
@@ -1008,6 +1009,7 @@ async def process_generator(
 
             async for event in _clean_content_step(state, loop=loop, root_span=root_span, deps=deps):
                 yield event
+            await loop.run_in_executor(None, deps.unload_clean_model)
             sse_event = _substitute_speaker_names_step(state, deps=deps)
             if sse_event:
                 yield sse_event

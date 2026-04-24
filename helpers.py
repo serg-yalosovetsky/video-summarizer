@@ -100,7 +100,7 @@ def _warm_ollama_model(model: str, *, timeout: float) -> None:
         "model": model,
         "prompt": "Reply with exactly one token: ok",
         "stream": False,
-        "keep_alive": "0",
+        "keep_alive": 0,
         "options": {"num_predict": 1, "temperature": 0},
     }
     response = httpx.post(OLLAMA_URL, json=payload, timeout=timeout)
