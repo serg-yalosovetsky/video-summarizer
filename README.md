@@ -136,7 +136,7 @@ OLLAMA_DEVICE=auto
 | `OLLAMA_SUMMARY_MAX_TOKENS` | `4096` | Max tokens for summary/todo output |
 | `OLLAMA_CLEAN_MAX_TOKENS` | `4096` | Max tokens for transcript cleaning output |
 | `OLLAMA_NUM_CTX` | `12288` | Context window size sent to Ollama |
-| `STAGE_DELAY_SECONDS` | `10` | Pause between Ollama stages (lets VRAM settle) |
+| `STAGE_DELAY_SECONDS` | `1` | Pause between Ollama stages (lets VRAM settle) |
 | `CANARY_SEGMENT_BATCH_SIZE` | `8` | Batch size for Canary transcription segments |
 | `PYANNOTE_MODEL` | `pyannote/speaker-diarization-3.1` | Speaker diarization model |
 | `PYANNOTE_DEVICE` | `auto` | Device for pyannote (`auto`, `cuda`, `cpu`) |

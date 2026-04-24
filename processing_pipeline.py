@@ -173,10 +173,11 @@ async def _sleep_between_stages(
     delay_seconds = max(0, int(getattr(deps.settings, "stage_delay_seconds", 0)))
     if delay_seconds <= 0:
         return
-    deps.log.info("  [pause] waiting %ds before %s...", delay_seconds, next_stage_label)
+    seconds_label = "second" if delay_seconds == 1 else "seconds"
+    deps.log.info("  [pause] waiting %d %s before %s...", delay_seconds, seconds_label, next_stage_label)
     yield deps.sse(
         "status",
-        {"message": f"Waiting {delay_seconds} seconds before {next_stage_label}..."},
+        {"message": f"Waiting {delay_seconds} {seconds_label} before {next_stage_label}..."},
     )
     await asyncio.sleep(delay_seconds)
 

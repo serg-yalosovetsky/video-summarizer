@@ -194,7 +194,7 @@ def build_settings() -> Settings:
         ollama_summary_max_tokens=_env_int("OLLAMA_SUMMARY_MAX_TOKENS", 4096),
         ollama_clean_max_tokens=_env_int("OLLAMA_CLEAN_MAX_TOKENS", 4096),
         ollama_clean_timeout_seconds=_env_int("OLLAMA_CLEAN_TIMEOUT_SECONDS", 1800),
-        stage_delay_seconds=max(0, _env_int("STAGE_DELAY_SECONDS", 10)),
+        stage_delay_seconds=max(0, _env_int("STAGE_DELAY_SECONDS", 1)),
         max_visual_context_chars=_env_int("MAX_VISUAL_CONTEXT_CHARS", 2000),
         langfuse_public_key=langfuse_public_key,
         langfuse_secret_key=langfuse_secret_key,

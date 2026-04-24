@@ -91,8 +91,29 @@ class ShortSummaryResponse(BaseModel):
     estimated_resolution: str = Field(default="")
     key_points: list[str] = Field(default_factory=list)
 
-
-PERSONAL_TODO_SCHEMA = PersonalTodoResponse.model_json_schema()
+PERSONAL_TODO_SCHEMA = {
+    "type": "object",
+    "title": "PersonalTodoResponse",
+    "properties": {
+        "items": {
+            "type": "array",
+            "title": "Items",
+            "items": {
+                "type": "object",
+                "title": "PersonalTodoItem",
+                "properties": {
+                    "timestamp": {"type": "string", "title": "Timestamp", "default": ""},
+                    "assigner": {"type": "string", "title": "Assigner", "default": ""},
+                    "action": {"type": "string", "title": "Action", "default": ""},
+                },
+                "required": ["timestamp", "assigner", "action"],
+                "additionalProperties": False,
+            },
+        }
+    },
+    "required": ["items"],
+    "additionalProperties": False,
+}
 SHORT_SUMMARY_SCHEMA = ShortSummaryResponse.model_json_schema()
 
 
@@ -632,13 +653,23 @@ def generate_personal_todo(
         user_aliases=", ".join(user_profile["aliases"]),
     )
     opts = {**OLLAMA_SUMMARY_OPTIONS, **(options_override or {})}
-    raw = call_ollama(
-        prompt,
-        PERSONAL_TODO_SYSTEM,
-        options=opts,
-        format=PERSONAL_TODO_SCHEMA,
-    )
-    response = _parse_structured_response(raw, PersonalTodoResponse)
+    try:
+        raw = call_ollama(
+            prompt,
+            PERSONAL_TODO_SYSTEM,
+            options=opts,
+            format=PERSONAL_TODO_SCHEMA,
+        )
+        response = _parse_structured_response(raw, PersonalTodoResponse)
+    except ValueError:
+        # Some Ollama/model combinations fail on nested referenced schemas or return
+        # empty output for structured mode; retry with prompt-only JSON instructions.
+        raw = call_ollama(
+            prompt,
+            PERSONAL_TODO_SYSTEM,
+            options=opts,
+        )
+        response = _parse_structured_response(raw, PersonalTodoResponse)
     return _render_personal_todo(response, user_name=user_profile["primary_name"])
 
 

@@ -1287,6 +1287,34 @@ class SummaryHelperTests(unittest.TestCase):
         self.assertIn('return exactly: {"items": []}', call_ollama.call_args.args[0])
         self.assertEqual(call_ollama.call_args.kwargs["format"], summary.PERSONAL_TODO_SCHEMA)
 
+    def test_generate_personal_todo_retries_without_schema_when_structured_call_returns_empty(self):
+        raw = json.dumps(
+            {
+                "items": [
+                    {
+                        "timestamp": "00:14:58",
+                        "assigner": "SPEAKER_02",
+                        "action": "Look into the Fastify versus FastAPI architecture question and report back.",
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        )
+
+        with (
+            mock.patch.object(summary, "load_user_profile", return_value={"primary_name": "Сергей", "aliases": ["Сергей", "SY"]}),
+            mock.patch.object(summary, "call_ollama", side_effect=["", raw]) as call_ollama,
+        ):
+            result = summary.generate_personal_todo("Meeting transcript")
+
+        self.assertEqual(
+            result,
+            "- [00:14:58] [SPEAKER_02] → Look into the Fastify versus FastAPI architecture question and report back.",
+        )
+        self.assertEqual(call_ollama.call_count, 2)
+        self.assertEqual(call_ollama.call_args_list[0].kwargs["format"], summary.PERSONAL_TODO_SCHEMA)
+        self.assertNotIn("format", call_ollama.call_args_list[1].kwargs)
+
     def test_generate_personal_todo_returns_default_message_for_empty_items(self):
         with (
             mock.patch.object(summary, "load_user_profile", return_value={"primary_name": "Сергей", "aliases": ["Сергей"]}),
@@ -1295,6 +1323,16 @@ class SummaryHelperTests(unittest.TestCase):
             result = summary.generate_personal_todo("Meeting transcript")
 
         self.assertEqual(result, "Задач для Сергей не найдено.")
+
+    def test_personal_todo_schema_is_inline_for_ollama(self):
+        self.assertNotIn("$defs", summary.PERSONAL_TODO_SCHEMA)
+        items_schema = summary.PERSONAL_TODO_SCHEMA["properties"]["items"]["items"]
+        self.assertEqual(items_schema["type"], "object")
+        self.assertNotIn("$ref", items_schema)
+        self.assertEqual(
+            set(items_schema["properties"].keys()),
+            {"timestamp", "assigner", "action"},
+        )
 
 
 class DiarizationPreparationTests(unittest.TestCase):

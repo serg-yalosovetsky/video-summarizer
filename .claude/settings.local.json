@@ -18,7 +18,9 @@
       "Bash(.venv/bin/pytest tests/test_main_pipeline.py -v -k \"self_speaker\")",
       "Bash(python3 -c 'import ast, sys *)",
       "Bash(python3 -c 'import ast *)",
-      "Bash(python3 -c \"import json; e = KeyError\\('items'\\); print\\(repr\\(str\\(e\\)\\)\\); print\\(str\\(e\\)\\)\")"
+      "Bash(python3 -c \"import json; e = KeyError\\('items'\\); print\\(repr\\(str\\(e\\)\\)\\); print\\(str\\(e\\)\\)\")",
+      "Bash(git -C /home/syalosovetskyi/ai/video-summarizer log --oneline -5 -- prompts.py)",
+      "Bash(git -C /home/syalosovetskyi/ai/video-summarizer show 6564bf2:prompts.py)"
     ]
   }
 }
