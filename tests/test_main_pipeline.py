@@ -468,6 +468,16 @@ class OllamaReadyTests(unittest.TestCase):
             helpers.ensure_ollama_ready("gemma4:e4b")
 
         post_mock.assert_called_once()
+        self.assertEqual(
+            post_mock.call_args.kwargs["json"],
+            models.OllamaWarmModelRequest(
+                model="gemma4:e4b",
+                prompt="Reply with exactly one token: ok",
+                stream=False,
+                keep_alive=0,
+                options={"num_predict": 1, "temperature": 0},
+            ).model_dump(),
+        )
 
     def test_ensure_ollama_ready_rejects_cpu_only_ollama(self):
         tags_response = self._response({"models": [{"name": "gemma4:e4b"}]})
@@ -504,6 +514,87 @@ class OllamaReadyTests(unittest.TestCase):
 
         self.assertEqual(get_mock.call_count, 1)
         post_mock.assert_not_called()
+
+
+class OllamaRequestPayloadTests(unittest.TestCase):
+    def test_call_ollama_serializes_text_request_model(self):
+        response = mock.Mock()
+        response.raise_for_status.return_value = None
+        response.json.return_value = {"response": "done"}
+        request_format = {"type": "object", "properties": {"summary": {"type": "string"}}}
+        options = {"temperature": 0, "num_predict": 128}
+
+        with (
+            mock.patch.object(helpers, "save_text_request"),
+            mock.patch.object(
+                helpers,
+                "start_observation",
+                side_effect=lambda *args, **kwargs: contextlib.nullcontext(None),
+            ),
+            mock.patch.object(helpers.httpx, "post", return_value=response) as post_mock,
+        ):
+            result = helpers.call_ollama(
+                "Summarize this",
+                "Be concise",
+                timeout=12.0,
+                model="gemma4:e4b",
+                options=options,
+                format=request_format,
+            )
+
+        self.assertEqual(result, "done")
+        self.assertEqual(
+            post_mock.call_args.kwargs["json"],
+            models.OllamaTextGenerateRequest(
+                model="gemma4:e4b",
+                prompt="Summarize this",
+                system="Be concise",
+                stream=False,
+                options=options,
+                format=request_format,
+            ).model_dump(exclude_none=True),
+        )
+
+    def test_unload_ollama_models_serializes_unload_request_model(self):
+        response = mock.Mock()
+        response.raise_for_status.return_value = None
+        response.json.return_value = {}
+        ps_response = mock.Mock()
+        ps_response.raise_for_status.return_value = None
+        ps_response.json.return_value = {"models": []}
+
+        with (
+            mock.patch.object(helpers.httpx, "post", return_value=response) as post_mock,
+            mock.patch.object(helpers.httpx, "get", return_value=ps_response),
+        ):
+            helpers.unload_ollama_models("gemma4:e4b")
+
+        self.assertEqual(
+            post_mock.call_args.kwargs["json"],
+            models.OllamaUnloadModelRequest(model="gemma4:e4b", keep_alive=0).model_dump(),
+        )
+
+    def test_frames_vision_payload_uses_request_model(self):
+        payload = frames_analyze._ollama_request_payload(
+            "Describe this frame",
+            "Return JSON",
+            "image-as-b64",
+            {"type": "object"},
+        )
+
+        self.assertIsInstance(payload, models.OllamaVisionGenerateRequest)
+        self.assertEqual(
+            payload.model_dump(),
+            models.OllamaVisionGenerateRequest(
+                model=frames_analyze.FRAME_MODEL,
+                prompt="Describe this frame",
+                system="Return JSON",
+                images=["image-as-b64"],
+                stream=False,
+                format={"type": "object"},
+                keep_alive=frames_analyze._OLLAMA_KEEP_ALIVE,
+            ).model_dump(),
+        )
 
 
 class RunDiarizationTests(unittest.TestCase):
@@ -1157,6 +1248,8 @@ class SummaryHelperTests(unittest.TestCase):
                 ]
             ),
         )
+        self.assertIn('"summary": "short 1-2 sentence TLDR"', call_ollama.call_args.args[0])
+        self.assertIn('"key_points": ["important point 1", "important point 2"]', call_ollama.call_args.args[0])
         self.assertEqual(call_ollama.call_args.kwargs["format"], summary.SHORT_SUMMARY_SCHEMA)
 
     def test_generate_short_summary_accepts_fenced_json(self):
@@ -1190,6 +1283,8 @@ class SummaryHelperTests(unittest.TestCase):
             result = summary.generate_personal_todo("Meeting transcript")
 
         self.assertEqual(result, "- [00:12:34] [Alice] → Проверить логи и прислать статус в общий чат.")
+        self.assertIn('"items": [{"timestamp": "HH:MM:SS", "assigner": "Name", "action": "Concrete action sentence."}]', call_ollama.call_args.args[0])
+        self.assertIn('return exactly: {"items": []}', call_ollama.call_args.args[0])
         self.assertEqual(call_ollama.call_args.kwargs["format"], summary.PERSONAL_TODO_SCHEMA)
 
     def test_generate_personal_todo_returns_default_message_for_empty_items(self):

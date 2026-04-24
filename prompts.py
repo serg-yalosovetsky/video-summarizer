@@ -88,14 +88,14 @@ SUMMARY_PROMPT_TEMPLATE = (
 SHORT_SUMMARY_PROMPT_TEMPLATE = (
     "Read the transcript below and return ONLY valid JSON.\n\n"
     "Use exactly this JSON object shape:\n"
-    "{\n"
+    "{{\n"
     '  "summary": "short 1-2 sentence TLDR",\n'
     '  "problem": "main issue being addressed, or empty string",\n'
     '  "ways_to_solve": ["approach 1", "approach 2"],\n'
     '  "blockers": ["blocker 1", "blocker 2"],\n'
     '  "estimated_resolution": "timeframe or next step, or empty string",\n'
     '  "key_points": ["important point 1", "important point 2"]\n'
-    "}\n\n"
+    "}}\n\n"
     "Rules:\n"
     "- Use the SAME LANGUAGE as the transcript\n"
     "- If this is a problem/discussion, fill problem, ways_to_solve, blockers, and estimated_resolution when relevant\n"
@@ -121,10 +121,10 @@ PERSONAL_TODO_PROMPT_TEMPLATE = (
     "- Each task action must be exactly one complete sentence\n"
     "- Use the timestamp and assigner exactly as they appear in the transcript\n"
     "- Return ONLY valid JSON in this shape:\n"
-    '  {"items": [{"timestamp": "HH:MM:SS", "assigner": "Name", "action": "Concrete action sentence."}]}\n'
+    '  {{"items": [{{"timestamp": "HH:MM:SS", "assigner": "Name", "action": "Concrete action sentence."}}]}}\n'
     '- Use timestamp without brackets in JSON, for example "00:12:34"\n'
     "- Use assigner without brackets in JSON\n"
-    '- If no tasks are assigned to {user_name}, return exactly: {"items": []}\n'
+    '- If no tasks are assigned to {user_name}, return exactly: {{"items": []}}\n'
     "- Do not wrap the JSON in markdown fences\n\n"
     "Transcript:\n---\n{transcript}\n---"
 )

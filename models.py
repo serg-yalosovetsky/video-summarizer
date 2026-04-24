@@ -1,6 +1,56 @@
 from __future__ import annotations
 
+from typing import Any
+
 from pydantic import BaseModel, Field
+
+
+class OllamaWarmModelRequest(BaseModel):
+    model: str
+    prompt: str
+    stream: bool = False
+    keep_alive: int = 0
+    options: dict[str, Any] = Field(default_factory=dict)
+
+
+class OllamaUnloadModelRequest(BaseModel):
+    model: str
+    keep_alive: int = 0
+
+
+class OllamaTextGenerateRequest(BaseModel):
+    model: str
+    prompt: str
+    system: str = ""
+    stream: bool = False
+    options: dict[str, Any] = Field(default_factory=dict)
+    format: dict[str, Any] | None = None
+
+
+class OllamaVisionGenerateRequest(BaseModel):
+    model: str
+    prompt: str
+    system: str
+    images: list[str]
+    stream: bool = False
+    format: dict[str, Any]
+    keep_alive: str | int
+
+
+class OllamaTextDebugConfig(BaseModel):
+    type: str = "text"
+    model: str
+    url: str
+    timeout_seconds: float
+    options: dict[str, Any] = Field(default_factory=dict)
+
+
+class OllamaVisionDebugConfig(BaseModel):
+    type: str = "vision"
+    model: str
+    url: str
+    timeout_seconds: float
+    keep_alive: str | int
 
 
 class ActiveSpeakerDetection(BaseModel):

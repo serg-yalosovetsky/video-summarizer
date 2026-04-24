@@ -17,7 +17,8 @@
       "Bash(.venv/bin/pytest tests/test_main_pipeline.py -q -k \"SpeakerFrame or analyze_speaker\")",
       "Bash(.venv/bin/pytest tests/test_main_pipeline.py -v -k \"self_speaker\")",
       "Bash(python3 -c 'import ast, sys *)",
-      "Bash(python3 -c 'import ast *)"
+      "Bash(python3 -c 'import ast *)",
+      "Bash(python3 -c \"import json; e = KeyError\\('items'\\); print\\(repr\\(str\\(e\\)\\)\\); print\\(str\\(e\\)\\)\")"
     ]
   }
 }

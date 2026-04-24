@@ -747,6 +747,11 @@ async def _generate_tldr_text(
     tldr_stage: str,
     deps: PipelineDeps,
 ) -> str:
+    failure_message = (
+        "Не вдалося згенерувати персональний ToDo."
+        if is_meeting
+        else "Не вдалося згенерувати короткий підсумок."
+    )
     base_callable = (
         (lambda: deps.generate_personal_todo(summary_input))
         if is_meeting
@@ -793,11 +798,11 @@ async def _generate_tldr_text(
                 output_builder=lambda text: {"text_length": len(text)},
             )
         except Exception as exc:
-            deps.log.warning("  [gemma/%s] retry failed — skipping tldr: %s", tldr_stage, exc)
-            return "Не вдалося згенерувати короткий підсумок."
+            deps.log.warning("  [gemma/%s] retry failed — skipping output: %s", tldr_stage, exc)
+            return failure_message
         if deps.looks_like_missing_content_response(tldr_text):
-            deps.log.warning("  [gemma/%s] both attempts failed — skipping tldr", tldr_stage)
-            return "Не вдалося згенерувати короткий підсумок."
+            deps.log.warning("  [gemma/%s] both attempts failed — skipping output", tldr_stage)
+            return failure_message
     elif deps.looks_truncated_response(tldr_text):
         deps.log.warning("  [gemma/%s] response looks truncated; retrying with higher token limit", tldr_stage)
         truncated = summary_input[:12000]

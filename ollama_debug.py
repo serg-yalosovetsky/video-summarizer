@@ -5,6 +5,8 @@ import json
 import time
 from pathlib import Path
 
+from models import OllamaTextDebugConfig, OllamaVisionDebugConfig
+
 _DEBUG_ROOT = Path(__file__).parent / "temp"
 _counter = 0
 
@@ -32,14 +34,13 @@ def save_text_request(
     (folder / "prompt.txt").write_text(prompt, encoding="utf-8")
     if system:
         (folder / "system.txt").write_text(system, encoding="utf-8")
-    config = {
-        "type": "text",
-        "model": model,
-        "url": url,
-        "timeout_seconds": timeout,
-        "options": options,
-    }
-    (folder / "config.json").write_text(json.dumps(config, indent=2), encoding="utf-8")
+    config = OllamaTextDebugConfig(
+        model=model,
+        url=url,
+        timeout_seconds=timeout,
+        options=options,
+    )
+    (folder / "config.json").write_text(config.model_dump_json(indent=2), encoding="utf-8")
     if schema:
         (folder / "schema.json").write_text(json.dumps(schema, indent=2), encoding="utf-8")
 
@@ -65,11 +66,10 @@ def save_vision_request(
     except Exception:
         (folder / "image_b64.txt").write_text(b64_image[:200] + "...", encoding="utf-8")
     (folder / "schema.json").write_text(json.dumps(schema, indent=2), encoding="utf-8")
-    config = {
-        "type": "vision",
-        "model": model,
-        "url": url,
-        "timeout_seconds": timeout,
-        "keep_alive": keep_alive,
-    }
-    (folder / "config.json").write_text(json.dumps(config, indent=2), encoding="utf-8")
+    config = OllamaVisionDebugConfig(
+        model=model,
+        url=url,
+        timeout_seconds=timeout,
+        keep_alive=keep_alive,
+    )
+    (folder / "config.json").write_text(config.model_dump_json(indent=2), encoding="utf-8")

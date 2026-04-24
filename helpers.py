@@ -11,6 +11,11 @@ from functools import lru_cache
 import httpx
 
 from config import settings
+from models import (
+    OllamaTextGenerateRequest,
+    OllamaUnloadModelRequest,
+    OllamaWarmModelRequest,
+)
 from ollama_debug import save_text_request
 from tracing import start_observation
 
@@ -96,14 +101,14 @@ def _ollama_warm_timeout_seconds(timeout: float) -> float:
 
 
 def _warm_ollama_model(model: str, *, timeout: float) -> None:
-    payload = {
-        "model": model,
-        "prompt": "Reply with exactly one token: ok",
-        "stream": False,
-        "keep_alive": 0,
-        "options": {"num_predict": 1, "temperature": 0},
-    }
-    response = httpx.post(OLLAMA_URL, json=payload, timeout=timeout)
+    request_payload = OllamaWarmModelRequest(
+        model=model,
+        prompt="Reply with exactly one token: ok",
+        stream=False,
+        keep_alive=0,
+        options={"num_predict": 1, "temperature": 0},
+    )
+    response = httpx.post(OLLAMA_URL, json=request_payload.model_dump(), timeout=timeout)
     response.raise_for_status()
 
 
@@ -246,8 +251,8 @@ def unload_ollama_models(*models: str, timeout: float = 10.0) -> None:
     unique_models = list(dict.fromkeys(m for m in models if m))
     for model in unique_models:
         try:
-            payload = {"model": model, "keep_alive": 0}
-            resp = httpx.post(OLLAMA_URL, json=payload, timeout=timeout)
+            request_payload = OllamaUnloadModelRequest(model=model, keep_alive=0)
+            resp = httpx.post(OLLAMA_URL, json=request_payload.model_dump(), timeout=timeout)
             resp.raise_for_status()
         except Exception as exc:
             log.warning("Failed to send unload request for Ollama model %s: %s", model, exc)
@@ -354,6 +359,14 @@ def call_ollama(
     request_model = model or OLLAMA_MODEL
     resolved_options = options or {}
     resolved_timeout = timeout or settings.ollama_timeout_seconds
+    request_payload = OllamaTextGenerateRequest(
+        model=request_model,
+        prompt=prompt,
+        system=system,
+        stream=False,
+        options=resolved_options,
+        format=format,
+    )
     save_text_request(
         prompt=prompt,
         system=system,
@@ -363,15 +376,6 @@ def call_ollama(
         schema=format,
         timeout=resolved_timeout,
     )
-    payload = {
-        "model": request_model,
-        "prompt": prompt,
-        "system": system,
-        "stream": False,
-        "options": resolved_options,
-    }
-    if format is not None:
-        payload["format"] = format
     with start_observation(
         "ollama.generate",
         as_type="generation",
@@ -379,14 +383,14 @@ def call_ollama(
         input={
             "prompt": prompt,
             "system": system,
-            "options": payload["options"],
+            "options": request_payload.options,
             "format": format,
         },
         metadata={"provider": "ollama", "url": OLLAMA_URL},
     ) as generation:
         response = httpx.post(
             OLLAMA_URL,
-            json=payload,
+            json=request_payload.model_dump(exclude_none=True),
             timeout=resolved_timeout,
         )
         response.raise_for_status()

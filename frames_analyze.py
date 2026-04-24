@@ -20,6 +20,7 @@ from models import (
     ActiveSpeakerDetection,
     CaptionExtraction,
     FrameAnalysisResult,
+    OllamaVisionGenerateRequest,
     SpeakerAppearance,
     SpeakerFrameResult,
     SpeakerPanelName,
@@ -206,16 +207,16 @@ def _ollama_request_payload(
     system: str,
     b64_image: str,
     schema: dict,
-) -> dict[str, object]:
-    return {
-        "model": FRAME_MODEL,
-        "prompt": prompt,
-        "system": system,
-        "images": [b64_image],
-        "stream": False,
-        "format": schema,
-        "keep_alive": _OLLAMA_KEEP_ALIVE,
-    }
+) -> OllamaVisionGenerateRequest:
+    return OllamaVisionGenerateRequest(
+        model=FRAME_MODEL,
+        prompt=prompt,
+        system=system,
+        images=[b64_image],
+        stream=False,
+        format=schema,
+        keep_alive=_OLLAMA_KEEP_ALIVE,
+    )
 
 
 def _log_ollama_transport_error(
@@ -381,7 +382,7 @@ def _ollama_vision_post(prompt: str, system: str, b64_image: str, schema: dict) 
     try:
         response = httpx.post(
             OLLAMA_URL,
-            json=_ollama_request_payload(prompt, system, b64_image, schema),
+            json=_ollama_request_payload(prompt, system, b64_image, schema).model_dump(),
             timeout=_OLLAMA_TIMEOUT_SECONDS,
         )
     except httpx.TimeoutException as exc:
