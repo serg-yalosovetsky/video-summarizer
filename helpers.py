@@ -241,14 +241,36 @@ def ensure_ollama_ready(*models: str, timeout: float = 10.0) -> None:
 
 
 def unload_ollama_models(*models: str, timeout: float = 10.0) -> None:
+    import time
+
     unique_models = list(dict.fromkeys(m for m in models if m))
     for model in unique_models:
         try:
-            payload = {"model": model, "keep_alive": "0"}
-            httpx.post(OLLAMA_URL, json=payload, timeout=timeout)
-            log.info("Ollama model %s unloaded from VRAM.", model)
+            payload = {"model": model, "keep_alive": 0}
+            resp = httpx.post(OLLAMA_URL, json=payload, timeout=timeout)
+            resp.raise_for_status()
         except Exception as exc:
-            log.warning("Failed to unload Ollama model %s: %s", model, exc)
+            log.warning("Failed to send unload request for Ollama model %s: %s", model, exc)
+            continue
+
+        # Poll /api/ps to confirm the model is gone from VRAM (up to 10s)
+        deadline = time.monotonic() + 10.0
+        confirmed = False
+        while time.monotonic() < deadline:
+            try:
+                ps_resp = httpx.get(ollama_ps_url(), timeout=5.0)
+                ps_resp.raise_for_status()
+                if _find_loaded_ollama_model(ps_resp.json(), model) is None:
+                    confirmed = True
+                    break
+            except Exception:
+                break
+            time.sleep(0.5)
+
+        if confirmed:
+            log.info("Ollama model %s confirmed unloaded from VRAM.", model)
+        else:
+            log.warning("Ollama model %s unload request sent but could not confirm VRAM release.", model)
 
 
 def combine_sources(transcript: str, chat: str) -> str:

@@ -88,6 +88,7 @@ def choose_device() -> str:
 
 
 def release_canary_model() -> None:
+    import gc
     import torch
 
     if get_canary_model.cache_info().currsize == 0:
@@ -96,8 +97,10 @@ def release_canary_model() -> None:
         model = get_canary_model()
         get_canary_model.cache_clear()
         del model
+        gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
+            torch.cuda.synchronize()
         log.info("Canary model released from CUDA.")
     except Exception as exc:
         log.warning("Failed to release Canary model: %s", exc)

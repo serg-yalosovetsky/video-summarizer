@@ -461,8 +461,8 @@
     /* Scroll nav */
     #scroll-nav {
       position: fixed;
-      left: 1.25rem;
-      bottom: 1.25rem;
+      right: 1.05rem;
+      bottom: calc(1.25rem + 0.95rem + 44px + 0.6rem);
       z-index: 1000;
       display: flex;
       flex-direction: column;
@@ -556,18 +556,7 @@
       </div>
     </details>
 
-    <!-- Spoiler 2: Raw transcript -->
-    <details id="spoiler-transcript" style="display:none">
-      <summary>
-        Сырая транскрипция (NeMo Canary)
-        <span class="badge" id="badge-transcript">...</span>
-      </summary>
-      <div class="spoiler-body">
-        <pre id="content-transcript"></pre>
-      </div>
-    </details>
-
-    <!-- Spoiler 2b: Visual context from frames -->
+    <!-- Spoiler 2: Visual context from frames -->
     <details id="spoiler-frames" style="display:none">
       <summary>
         Визуальный контекст кадров (идентификация спикеров)
@@ -575,6 +564,17 @@
       </summary>
       <div class="spoiler-body">
         <pre id="content-frames"></pre>
+      </div>
+    </details>
+
+    <!-- Spoiler 2b: Raw transcript -->
+    <details id="spoiler-transcript" style="display:none">
+      <summary>
+        Сырая транскрипция (NeMo Canary)
+        <span class="badge" id="badge-transcript">...</span>
+      </summary>
+      <div class="spoiler-body">
+        <pre id="content-transcript"></pre>
       </div>
     </details>
 

@@ -2,11 +2,14 @@
 
 A local web app that transcribes audio/video files and produces a cleaned transcript and structured summary — entirely on your own hardware, no cloud APIs.
 
-**Pipeline:**
+**Pipeline (sequential):**
 1. **FFmpeg** — converts any audio/video to 16 kHz mono WAV
-2. **NVIDIA Canary 1B v2** (NeMo) — speech-to-text transcription
-3. **Gemma 4 27B** (Ollama) — cleans the raw transcript
-4. **Gemma 4 27B** (Ollama) — generates a structured summary
+2. **pyannote** — speaker diarization
+3. **NVIDIA Canary 1B v2** (NeMo) — speech-to-text transcription
+4. **Gemma** (Ollama) — cleans the raw transcript
+5. **Gemma** (Ollama) — detects whether the recording is a meeting
+6. **Gemma** (Ollama) — generates a structured summary
+7. **Gemma** (Ollama) — generates a personal ToDo (meetings) or TL;DR (other)
 
 Results stream to the browser in real time via SSE.
 
@@ -72,8 +75,9 @@ sudo apt install ffmpeg
 # Install Ollama (Linux)
 curl -fsSL https://ollama.com/install.sh | sh
 
-# Pull the model
-ollama pull gemma4:27b
+# Pull the models
+ollama pull gemma4:e4b
+ollama pull gemma4:e2b
 
 # Ollama starts automatically; or run manually:
 ollama serve
@@ -96,13 +100,16 @@ HF_TOKEN=hf_your_token_here
 OLLAMA_BASE_URL=http://localhost:11434
 OLLAMA_DEVICE=gpu
 OLLAMA_MODEL=gemma4:e4b
+OLLAMA_CLEAN_MODEL=gemma4:e2b
 FRAME_MODEL=gemma4:e4b
 CANARY_DEVICE=cuda
 MAX_UPLOAD_MB=0
 ```
 
-`USER_PRIMARY_NAME` and `USER_ALIASES` are used in the personalized summary sections like "What concerns ..." and personal meeting todos.
+`USER_PRIMARY_NAME` and `USER_ALIASES` are used in personalized summary sections like "What concerns ..." and personal meeting todos.
 If these variables are set in `.env`, they take priority over `.omx/project-memory.json`.
+
+`OLLAMA_MODEL` is used for summary and todo/tldr generation. `OLLAMA_CLEAN_MODEL` is used for the transcript cleaning step (defaults to a lighter model). `FRAME_MODEL` is used for visual frame analysis and defaults to `OLLAMA_MODEL` if not set.
 
 The app defaults to `CANARY_DEVICE=cuda` and will fail fast if CUDA is unavailable instead of silently using CPU.
 If you intentionally want CPU fallback for debugging, set:
@@ -111,7 +118,7 @@ If you intentionally want CPU fallback for debugging, set:
 CANARY_DEVICE=auto
 ```
 
-The app also defaults to `OLLAMA_DEVICE=gpu` and now refuses to continue if Ollama loads models without GPU usage.
+The app also defaults to `OLLAMA_DEVICE=gpu` and refuses to continue if Ollama loads models without GPU usage.
 If you intentionally want to skip that verification for debugging, set:
 
 ```env
@@ -119,6 +126,28 @@ OLLAMA_DEVICE=auto
 ```
 
 `MAX_UPLOAD_MB` is optional. Set it to `0` (or leave it empty) to disable the app-level upload cap, or set a positive number of megabytes if you want the server to reject larger files early.
+
+### Advanced settings
+
+| Variable | Default | Description |
+|---|---|---|
+| `OLLAMA_TIMEOUT_SECONDS` | `900` | Timeout for summary/todo Ollama calls |
+| `OLLAMA_CLEAN_TIMEOUT_SECONDS` | `1800` | Timeout for transcript cleaning calls |
+| `OLLAMA_SUMMARY_MAX_TOKENS` | `4096` | Max tokens for summary/todo output |
+| `OLLAMA_CLEAN_MAX_TOKENS` | `4096` | Max tokens for transcript cleaning output |
+| `OLLAMA_NUM_CTX` | `12288` | Context window size sent to Ollama |
+| `STAGE_DELAY_SECONDS` | `10` | Pause between Ollama stages (lets VRAM settle) |
+| `CANARY_SEGMENT_BATCH_SIZE` | `8` | Batch size for Canary transcription segments |
+| `PYANNOTE_MODEL` | `pyannote/speaker-diarization-3.1` | Speaker diarization model |
+| `PYANNOTE_DEVICE` | `auto` | Device for pyannote (`auto`, `cuda`, `cpu`) |
+| `FRAME_TIMESTAMPS` | `1,2,5,10` | Seconds at which to sample frames for visual analysis |
+| `MAX_FRAMES` | `20` | Maximum number of frames to analyze |
+| `MAX_VISUAL_CONTEXT_CHARS` | `2000` | Max chars of visual context passed to the summary step |
+| `NTFY_TOPIC` | *(internal)* | ntfy.sh topic for push notifications on completion |
+| `NTFY_URL` | derived from topic | Full ntfy URL (overrides `NTFY_TOPIC`) |
+| `LANGFUSE_PUBLIC_KEY` | — | Enable Langfuse tracing (optional) |
+| `LANGFUSE_SECRET_KEY` | — | Enable Langfuse tracing (optional) |
+| `LANGFUSE_BASE_URL` | `https://cloud.langfuse.com` | Langfuse endpoint |
 
 ---
 
@@ -178,7 +207,6 @@ The transcript is printed to stdout and saved as `<file>.transcript.txt`.
 Download the model once and point to it to avoid re-downloading:
 
 ```bash
-# Download via huggingface_hub
 python - <<'EOF'
 from huggingface_hub import snapshot_download
 snapshot_download("nvidia/canary-1b-v2", local_dir="./models/canary-1b-v2")
@@ -197,20 +225,29 @@ CANARY_MODEL=./models/canary-1b-v2/canary-1b-v2.nemo
 
 ```
 video-summarizer/
-├── main.py           # FastAPI app + pipeline
-├── transcribe.py     # Standalone CLI transcription script
+├── main.py                      # FastAPI app entry point
+├── processing_pipeline.py       # Full sequential processing pipeline
+├── summary.py                   # Ollama summary/todo/tldr generation
+├── prompts.py                   # Prompt templates
+├── config.py                    # Settings loaded from .env
+├── transcribe.py                # Standalone CLI transcription script
+├── transcribe_diarization.py    # Speaker diarization integration
+├── transcribe_ffmpeg.py         # FFmpeg audio conversion
+├── frames_analyze.py            # Frame extraction and visual analysis
+├── helpers.py                   # Shared utilities
+├── tracing.py                   # Langfuse tracing helpers
 ├── requirements.txt
 ├── static/
-│   └── index.html    # Single-page frontend
-├── .env.example      # Config template for new users
-└── .env              # Local overrides (not committed)
+│   └── index.html               # Single-page frontend
+├── .env.example                 # Config template for new users
+└── .env                         # Local overrides (not committed)
 ```
 
 ---
 
 ## Docker
 
-The container includes the Python app and `ffmpeg`. Ollama is not bundled — run it separately and pass the address via `OLLAMA_URL`.
+The container includes the Python app and `ffmpeg`. Ollama is not bundled — run it separately and pass the address via `OLLAMA_BASE_URL`.
 
 Build the image:
 
@@ -222,7 +259,7 @@ Run on Windows/macOS Docker Desktop with Ollama on the host:
 
 ```bash
 docker run --rm -p 8888:8888 ^
-  -e OLLAMA_URL=http://host.docker.internal:11434/api/generate ^
+  -e OLLAMA_BASE_URL=http://host.docker.internal:11434 ^
   -e OLLAMA_MODEL=gemma4:e4b ^
   -e HF_TOKEN=your_hf_token ^
   video-summarizer
@@ -233,7 +270,7 @@ Run on Linux with Ollama on the host:
 ```bash
 docker run --rm -p 8888:8888 \
   --add-host=host.docker.internal:host-gateway \
-  -e OLLAMA_URL=http://host.docker.internal:11434/api/generate \
+  -e OLLAMA_BASE_URL=http://host.docker.internal:11434 \
   -e OLLAMA_MODEL=gemma4:e4b \
   -e HF_TOKEN=your_hf_token \
   video-summarizer
@@ -242,5 +279,5 @@ docker run --rm -p 8888:8888 \
 If Ollama runs in a separate container on the same Docker network, use its service name:
 
 ```text
-http://ollama:11434/api/generate
+OLLAMA_BASE_URL=http://ollama:11434
 ```

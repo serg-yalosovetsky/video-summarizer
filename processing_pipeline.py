@@ -478,10 +478,13 @@ async def _analyze_frames_step(
             len(quality_eval["suspicious_same_appearance"]),
             len(quality_eval["unidentified"]),
         )
+        display_context = state.visual_context
+        if quality_eval["quality_label"] == "high" and quality_eval.get("reliable"):
+            display_context = deps.substitute_speaker_names(state.visual_context, quality_eval)
         yield deps.sse(
             "frames_done",
             {
-                "context": state.visual_context,
+                "context": display_context,
                 "quality_report": quality_report,
                 "quality_label": quality_eval["quality_label"],
                 "frames_count": total_analyzed,
@@ -850,26 +853,16 @@ async def _summary_and_tldr_step(
 
     yield deps.sse("status", {"message": tldr_message})
     deps.log.info("  [gemma/summary] calling ollama (meeting=%s)...", state.is_meeting)
-    deps.log.info("  [gemma/%s] calling ollama in parallel...", state.tldr_stage)
     summary_t0 = time.monotonic()
-    tldr_t0 = time.monotonic()
 
     combined = deps.combine_sources(state.raw_transcript, state.chat_text)
     summary_input = deps.prefer_meaningful_content(state.cleaned_text, combined)
     if summary_input != state.cleaned_text:
         deps.log.warning("  [gemma/summary] cleaned text unusable; falling back to combined source")
 
-    summary_future = asyncio.create_task(
-        _generate_summary_text(loop, summary_input, is_meeting=state.is_meeting, root_span=root_span, deps=deps)
-    )
-    tldr_future = asyncio.create_task(
-        _generate_tldr_text(loop, summary_input, is_meeting=state.is_meeting, tldr_stage=state.tldr_stage, deps=deps)
-    )
-
     try:
-        state.summary_text = await summary_future
+        state.summary_text = await _generate_summary_text(loop, summary_input, is_meeting=state.is_meeting, root_span=root_span, deps=deps)
     except Exception as exc:
-        tldr_future.cancel()
         message = str(exc)
         if "Модель не змогла обробити транскрипцію" in message:
             yield deps.sse("error", {"message": message + " Очищена транскрипція доступна для перегляду.", "stage": "summary"})
@@ -922,8 +915,10 @@ async def _summary_and_tldr_step(
         },
     )
 
+    tldr_t0 = time.monotonic()
+    deps.log.info("  [gemma/%s] calling ollama...", state.tldr_stage)
     try:
-        state.tldr_text = await tldr_future
+        state.tldr_text = await _generate_tldr_text(loop, summary_input, is_meeting=state.is_meeting, tldr_stage=state.tldr_stage, deps=deps)
     except Exception as exc:
         deps.log.error("  [gemma/%s] ERROR: %s", state.tldr_stage, exc)
         _set_root_error(root_span, f"{state.tldr_stage} generation failed: {exc}")
@@ -1023,6 +1018,7 @@ async def process_generator(
                 yield event
             async for event in _summary_and_tldr_step(state, loop=loop, root_span=root_span, deps=deps):
                 yield event
+            await loop.run_in_executor(None, deps.unload_ollama)
         except PipelineAbort:
             return
         finally:

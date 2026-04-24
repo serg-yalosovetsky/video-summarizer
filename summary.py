@@ -67,8 +67,8 @@ LIKELY_COMPLETE_ENDINGS = (
 TIMESTAMP_RE = re.compile(r"\[\d{2}:\s*\d{2}:\s*\d{2}\]")
 SUMMARY_DIRECT_MAX_CHARS = settings.ollama_num_ctx * 3
 SUMMARY_CHUNK_TARGET_CHARS = 6000
-SUMMARY_RETRY_MIN_TOKENS = 2048
-TLDR_RETRY_MIN_TOKENS = 1536
+SUMMARY_RETRY_MIN_TOKENS = 8192
+TLDR_RETRY_MIN_TOKENS = 4096
 _JSON_FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)```", re.IGNORECASE | re.DOTALL)
 _TIMESTAMP_VALUE_RE = re.compile(r"^\d{2}:\d{2}:\d{2}$")
 

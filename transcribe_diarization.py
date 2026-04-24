@@ -77,6 +77,7 @@ def get_diarizer():
 
 
 def release_diarizer() -> None:
+    import gc
     import torch
 
     if get_diarizer.cache_info().currsize == 0:
@@ -85,8 +86,10 @@ def release_diarizer() -> None:
         pipeline = get_diarizer()
         get_diarizer.cache_clear()
         del pipeline
+        gc.collect()
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
+            torch.cuda.synchronize()
         log.info("Pyannote diarizer released from CUDA.")
     except Exception as exc:
         log.warning("Failed to release diarizer: %s", exc)
