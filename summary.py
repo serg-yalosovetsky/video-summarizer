@@ -432,6 +432,38 @@ def _clean_structured_list(items: list[str], *, min_chars: int = 1) -> list[str]
     return cleaned
 
 
+_TODO_LOG_PREVIEW_CHARS = 500
+_TODO_LOG_CONTEXT_PREVIEW_CHARS = 900
+
+
+def _log_preview(text: str, *, limit: int = _TODO_LOG_PREVIEW_CHARS) -> str:
+    normalized = (text or "").replace("\r", "\n").strip().replace("\n", "\\n")
+    if len(normalized) <= limit:
+        return normalized
+    return normalized[:limit].rstrip() + "...[truncated]"
+
+
+def _log_options(options: dict | None) -> str:
+    payload = options or {}
+    try:
+        return json.dumps(payload, ensure_ascii=False, sort_keys=True)
+    except TypeError:
+        return repr(payload)
+
+
+def _log_todo_items(items: list[PersonalTodoItem], *, stage: str) -> None:
+    log.info("  [todo/%s] parsed %d item(s)", stage, len(items))
+    for index, item in enumerate(items, start=1):
+        log.info(
+            "  [todo/%s] item #%d timestamp=%s assigner=%s action=%s",
+            stage,
+            index,
+            str(item.timestamp or "").strip(),
+            _log_preview(str(item.assigner or "").strip(), limit=120) or "<empty>",
+            _log_preview(str(item.action or "").strip(), limit=220) or "<empty>",
+        )
+
+
 def _iter_json_candidates(raw: str):
     stripped = (raw or "").strip()
     if stripped:
@@ -456,20 +488,71 @@ def _extract_first_json_value(raw: str) -> object:
     raise ValueError("No JSON object found in model output")
 
 
-def _parse_structured_response(raw: str, schema_model: type[BaseModel]) -> BaseModel:
+def _parse_structured_response(
+    raw: str,
+    schema_model: type[BaseModel],
+    *,
+    log_label: str | None = None,
+) -> BaseModel:
     if looks_like_missing_content_response(raw):
+        if log_label:
+            log.warning(
+                "  [%s] model returned missing-content placeholder: %s",
+                log_label,
+                _log_preview(raw),
+            )
         raise ValueError("Model returned a missing-content placeholder")
 
     last_error: Exception | None = None
-    for candidate in _iter_json_candidates(raw):
+    candidate_count = 0
+    for candidate_count, candidate in enumerate(_iter_json_candidates(raw), start=1):
+        if log_label:
+            log.info(
+                "  [%s] trying JSON candidate #%d (%d chars): %s",
+                log_label,
+                candidate_count,
+                len(candidate),
+                _log_preview(candidate),
+            )
         try:
             return schema_model.model_validate_json(candidate)
         except Exception as exc:
             last_error = exc
+            if log_label:
+                log.warning(
+                    "  [%s] candidate #%d model_validate_json failed: %s",
+                    log_label,
+                    candidate_count,
+                    exc,
+                )
         try:
             return schema_model.model_validate(_extract_first_json_value(candidate))
         except Exception as exc:
             last_error = exc
+            if log_label:
+                log.warning(
+                    "  [%s] candidate #%d fallback model_validate failed: %s",
+                    log_label,
+                    candidate_count,
+                    exc,
+                )
+
+    if log_label:
+        if candidate_count == 0:
+            log.warning(
+                "  [%s] no JSON candidates found in raw response: %s",
+                log_label,
+                _log_preview(raw),
+            )
+        if last_error is not None:
+            log.error(
+                "  [%s] structured parse failed for %s: %s",
+                log_label,
+                schema_model.__name__,
+                last_error,
+            )
+        else:
+            log.error("  [%s] structured parse failed for %s", log_label, schema_model.__name__)
 
     raise ValueError("Model returned invalid structured content") from last_error
 
@@ -606,7 +689,7 @@ def _clean_rewritten_todo_action(text: str) -> str:
     cleaned = _TIMESTAMP_ANYWHERE_RE.sub("", cleaned)
     cleaned = _LEADING_SPEAKER_TAG_RE.sub("", cleaned)
     cleaned = re.sub(r"\s+", " ", cleaned).strip(" ,;:-")
-    if not cleaned or cleaned.upper() == _TODO_REWRITE_SENTINEL:
+    if not cleaned or cleaned.upper().startswith(_TODO_REWRITE_SENTINEL):
         return ""
 
     parts = [part.strip().rstrip(".!?") for part in _MULTI_SENTENCE_SPLIT_RE.split(cleaned) if part.strip()]
@@ -636,11 +719,32 @@ def _rewrite_personal_todo_item(
     assigner = _clean_structured_text(str(item.assigner or "").strip().strip("[]"), min_chars=1)
     action = _clean_structured_text(item.action, min_chars=6)
     if not _TIMESTAMP_VALUE_RE.fullmatch(timestamp) or not assigner or not action:
+        log.warning(
+            "  [todo/rewrite] skipping invalid item timestamp=%s assigner=%s action=%s",
+            timestamp or "<empty>",
+            assigner or "<empty>",
+            _log_preview(action, limit=220) or "<empty>",
+        )
         return ""
 
+    log.info(
+        "  [todo/rewrite] rewriting item for %s timestamp=%s assigner=%s action=%s",
+        user_name,
+        timestamp,
+        assigner,
+        _log_preview(action, limit=220),
+    )
     context_excerpt = _todo_context_excerpt(transcript, timestamp)
     if not context_excerpt:
+        log.warning("  [todo/rewrite] no transcript context found for timestamp=%s", timestamp)
         return ""
+    log.info(
+        "  [todo/rewrite] context for %s @ %s (%d chars): %s",
+        user_name,
+        timestamp,
+        len(context_excerpt),
+        _log_preview(context_excerpt, limit=_TODO_LOG_CONTEXT_PREVIEW_CHARS),
+    )
 
     prompt = _TODO_REWRITE_PROMPT_TEMPLATE.format(
         user_name=user_name,
@@ -655,7 +759,19 @@ def _rewrite_personal_todo_item(
     except Exception as exc:
         log.warning("Todo rewrite failed for %s @ %s: %s", user_name, timestamp, exc)
         return ""
-    return _clean_rewritten_todo_action(raw)
+    log.info(
+        "  [todo/rewrite] raw rewrite response for %s @ %s (%d chars): %s",
+        user_name,
+        timestamp,
+        len(raw or ""),
+        _log_preview(raw),
+    )
+    cleaned = _clean_rewritten_todo_action(raw)
+    if not cleaned:
+        log.warning("  [todo/rewrite] cleaned rewrite is empty for %s @ %s", user_name, timestamp)
+        return ""
+    log.info("  [todo/rewrite] final rewrite for %s @ %s: %s", user_name, timestamp, cleaned)
+    return cleaned
 
 
 def _render_rewritten_personal_todo(
@@ -667,6 +783,11 @@ def _render_rewritten_personal_todo(
 ) -> str:
     lines: list[str] = []
     seen: set[str] = set()
+    log.info(
+        "  [todo/render] rewriting up to %d extracted item(s) for %s",
+        min(len(response.items), _TODO_REWRITE_MAX_ITEMS),
+        user_name,
+    )
     for item in response.items[:_TODO_REWRITE_MAX_ITEMS]:
         rewritten = _rewrite_personal_todo_item(
             transcript,
@@ -678,11 +799,14 @@ def _render_rewritten_personal_todo(
             continue
         rendered = f"- {rewritten}"
         if rendered in seen:
+            log.info("  [todo/render] skipping duplicate rewritten item: %s", rendered)
             continue
         lines.append(rendered)
         seen.add(rendered)
     if lines:
+        log.info("  [todo/render] final todo list for %s has %d item(s)", user_name, len(lines))
         return "\n".join(lines)
+    log.info("  [todo/render] no todo items survived rewrite for %s", user_name)
     return f"Задач для {user_name} не найдено."
 
 
@@ -699,21 +823,47 @@ def _generate_personal_todo_response(
         user_aliases=", ".join(user_aliases),
     )
     opts = {**OLLAMA_SUMMARY_OPTIONS, **(options_override or {})}
+    transcript_lines = sum(1 for line in (transcript or "").splitlines() if line.strip())
+    log.info(
+        "  [todo] extracting tasks for user=%s aliases=%s transcript_chars=%d transcript_lines=%d options=%s",
+        user_name,
+        ", ".join(user_aliases) or "<none>",
+        len(transcript or ""),
+        transcript_lines,
+        _log_options(opts),
+    )
     try:
+        log.info("  [todo/structured] calling ollama with response schema")
         raw = call_ollama(
             prompt,
             PERSONAL_TODO_SYSTEM,
             options=opts,
             format=PERSONAL_TODO_SCHEMA,
         )
-        return _parse_structured_response(raw, PersonalTodoResponse)
-    except ValueError:
+        log.info(
+            "  [todo/structured] raw response (%d chars): %s",
+            len(raw or ""),
+            _log_preview(raw),
+        )
+        response = _parse_structured_response(raw, PersonalTodoResponse, log_label="todo/structured")
+        _log_todo_items(response.items, stage="structured")
+        return response
+    except ValueError as exc:
+        log.warning("  [todo/structured] failed; retrying without schema: %s", exc)
+        log.info("  [todo/fallback] calling ollama without response schema")
         raw = call_ollama(
             prompt,
             PERSONAL_TODO_SYSTEM,
             options=opts,
         )
-        return _parse_structured_response(raw, PersonalTodoResponse)
+        log.info(
+            "  [todo/fallback] raw response (%d chars): %s",
+            len(raw or ""),
+            _log_preview(raw),
+        )
+        response = _parse_structured_response(raw, PersonalTodoResponse, log_label="todo/fallback")
+        _log_todo_items(response.items, stage="fallback")
+        return response
 
 
 def generate_personal_todo_for_target(
@@ -723,22 +873,27 @@ def generate_personal_todo_for_target(
     user_aliases: list[str] | tuple[str, ...] | None = None,
     options_override: dict | None = None,
 ) -> str:
+    original_chars = len(transcript or "")
     transcript = local_preclean_content(transcript)
     aliases = [str(alias).strip() for alias in (user_aliases or [user_name]) if str(alias).strip()]
     if user_name not in aliases:
         aliases.insert(0, user_name)
+    if len(transcript) != original_chars:
+        log.info("  [todo] transcript precleaned: %d -> %d chars", original_chars, len(transcript))
     response = _generate_personal_todo_response(
         transcript,
         user_name=user_name,
         user_aliases=aliases,
         options_override=options_override,
     )
-    return _render_rewritten_personal_todo(
+    rendered = _render_rewritten_personal_todo(
         response,
         transcript=transcript,
         user_name=user_name,
         options_override=options_override,
     )
+    log.info("  [todo] final rendered output for %s: %s", user_name, _log_preview(rendered))
+    return rendered
 
 
 def generate_next_speaker_todo(

@@ -580,8 +580,8 @@ async def _clean_content_step(
     root_span,
     deps: PipelineDeps,
 ):
-    yield deps.sse("status", {"message": "Cleaning content with Gemma..."})
-    deps.log.info("  [gemma/clean] calling ollama...")
+    yield deps.sse("status", {"message": "Cleaning content with Ollama..."})
+    deps.log.info("  [ollama/clean] calling ollama...")
     t0 = time.monotonic()
     try:
         cleaned_transcript = ""
@@ -606,17 +606,17 @@ async def _clean_content_step(
             cleaned_chat = deps.local_preclean_content(state.chat_text)
         state.cleaned_text = deps.combine_sources(cleaned_transcript, cleaned_chat)
     except Exception as exc:
-        deps.log.error("  [gemma/clean] ERROR: %s", exc)
+        deps.log.error("  [ollama/clean] ERROR: %s", exc)
         _set_root_error(root_span, f"Cleaning failed: {exc}")
         yield deps.sse("error", {"message": f"Ollama (clean) error: {exc}", "stage": "clean"})
         raise PipelineAbort
 
-    deps.log.info("  [gemma/clean] done  (%.2fs)", time.monotonic() - t0)
+    deps.log.info("  [ollama/clean] done  (%.2fs)", time.monotonic() - t0)
     state.cleaned_text = deps.remove_repetitions(state.cleaned_text)
     combined = deps.combine_sources(state.raw_transcript, state.chat_text)
     state.cleaned_text = deps.prefer_meaningful_content(state.cleaned_text, combined)
     if deps.looks_like_missing_content_response(state.cleaned_text):
-        deps.log.warning("  [gemma/clean] model returned missing-content placeholder; using combined source text")
+        deps.log.warning("  [ollama/clean] model returned missing-content placeholder; using combined source text")
     state.cleaned_artifact_path = deps.write_artifact(
         f"{state.artifact_stem}.cleaned.txt",
         state.cleaned_text,
@@ -755,6 +755,8 @@ async def _generate_tldr_text(
         if is_meeting
         else "Не вдалося згенерувати короткий підсумок."
     )
+    if is_meeting:
+        deps.log.info("  [gemma/todo] generation input prepared (%d chars)", len(summary_input))
     base_callable = (
         (lambda: deps.generate_personal_todo(summary_input))
         if is_meeting
@@ -785,6 +787,8 @@ async def _generate_tldr_text(
                 tldr_stage,
             )
         truncated = summary_input[:8000]
+        if is_meeting:
+            deps.log.info("  [gemma/todo] retrying with truncated input (%d chars)", len(truncated))
         retry_callable = (
             (lambda: deps.generate_personal_todo(truncated, options_override={"temperature": 0.3}))
             if is_meeting
@@ -809,6 +813,8 @@ async def _generate_tldr_text(
     elif deps.looks_truncated_response(tldr_text):
         deps.log.warning("  [gemma/%s] response looks truncated; retrying with higher token limit", tldr_stage)
         truncated = summary_input[:12000]
+        if is_meeting:
+            deps.log.info("  [gemma/todo] retrying with higher token limit on %d chars", len(truncated))
         retry_callable = (
             (
                 lambda: deps.generate_personal_todo(
@@ -873,6 +879,14 @@ async def _summary_and_tldr_step(
     if state.is_meeting:
         todo_speakers = deps.extract_speakers_in_order(summary_input)
         todo_current_speaker = deps.resolve_default_todo_speaker(summary_input)
+        deps.log.info(
+            "  [gemma/todo] transcript context: chars=%d speakers=%d default_speaker=%s",
+            len(summary_input),
+            len(todo_speakers),
+            todo_current_speaker or "<none>",
+        )
+        if todo_speakers:
+            deps.log.info("  [gemma/todo] speakers in order: %s", ", ".join(todo_speakers))
 
     try:
         state.summary_text = await _generate_summary_text(loop, summary_input, is_meeting=state.is_meeting, root_span=root_span, deps=deps)

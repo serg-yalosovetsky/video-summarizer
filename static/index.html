@@ -731,6 +731,7 @@
       { re: /cleaning content/i,              id: 'cleaning',      label: 'Cleaning' },
       { re: /generating (meeting )?summary/i, id: 'summary',       label: 'Summary' },
       { re: /translating summary/i,           id: 'translation',   label: 'Translation' },
+      { re: /personal todo|to.?do/i,          id: 'todo',          label: 'ToDo' },
       { re: /short summary|tl.?dr/i,          id: 'tldr',          label: 'TL;DR' },
     ];
     const EVENT_ENDS = {
@@ -740,7 +741,7 @@
       transcript_done:  ['transcription'],
       cleaned_done:     ['cleaning'],
       summary_done:     ['summary', 'translation'],
-      tldr_done:        ['tldr'],
+      tldr_done:        ['todo', 'tldr'],
     };
     // ─────────────────────────────────────────────────────────────────────
 

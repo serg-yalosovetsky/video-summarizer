@@ -277,7 +277,7 @@ async def process_media(
 
 
 @app.post("/todo/next")
-async def todo_next(request: NextSpeakerTodoRequest):
+def todo_next(request: NextSpeakerTodoRequest):
     transcript = (request.transcript or "").strip()
     if not transcript:
         raise HTTPException(status_code=400, detail="Transcript is required.")
