@@ -64,6 +64,12 @@ SUMMARY_SYSTEM = (
     "IMPORTANT: Always respond in the same language as the input."
 )
 
+SHORT_SUMMARY_SYSTEM = (
+    "You are a precise TLDR generator. "
+    "Always respond in the same language as the transcript. "
+    "Output ONLY valid JSON that matches the requested schema."
+)
+
 SUMMARY_PROMPT_TEMPLATE = (
     "Read the transcript below and provide a DETAILED and COMPREHENSIVE summary in the SAME LANGUAGE as the transcript.\n\n"
     "Be thorough — cover every topic, argument, and point discussed. "
@@ -80,22 +86,30 @@ SUMMARY_PROMPT_TEMPLATE = (
 )
 
 SHORT_SUMMARY_PROMPT_TEMPLATE = (
-    "Read the transcript below and write a brief TLDR (short summary, approximately 10% of the original length).\n\n"
-    "If the transcript is about a problem or discussion, structure as:\n"
-    "- **Problem**: what issue is being addressed\n"
-    "- **Ways to solve**: approaches or actions taken/proposed\n"
-    "- **Blockers**: obstacles preventing resolution\n"
-    "- **Estimated resolution**: timeframe or next steps if mentioned\n\n"
-    "Otherwise write a plain structured summary of the key points only.\n\n"
-    "Do not stop mid-sentence. Make sure the final line is complete.\n\n"
-    "Use the SAME LANGUAGE as the transcript. Output only the summary.\n\n"
+    "Read the transcript below and return ONLY valid JSON.\n\n"
+    "Use exactly this JSON object shape:\n"
+    "{\n"
+    '  "summary": "short 1-2 sentence TLDR",\n'
+    '  "problem": "main issue being addressed, or empty string",\n'
+    '  "ways_to_solve": ["approach 1", "approach 2"],\n'
+    '  "blockers": ["blocker 1", "blocker 2"],\n'
+    '  "estimated_resolution": "timeframe or next step, or empty string",\n'
+    '  "key_points": ["important point 1", "important point 2"]\n'
+    "}\n\n"
+    "Rules:\n"
+    "- Use the SAME LANGUAGE as the transcript\n"
+    "- If this is a problem/discussion, fill problem, ways_to_solve, blockers, and estimated_resolution when relevant\n"
+    "- If this is not a problem/discussion, leave those fields as empty string or empty arrays and use summary/key_points\n"
+    "- Every string must be complete; do not cut off the last sentence\n"
+    "- Keep it concise and concrete\n"
+    "- Do not wrap the JSON in markdown fences\n\n"
     "Transcript:\n---\n{transcript}\n---"
 )
 
 PERSONAL_TODO_SYSTEM = (
     "You are a precise meeting task extractor. "
-    "Output only a numbered list. "
-    "IMPORTANT: Always respond in the same language as the transcript."
+    "Always respond in the same language as the transcript. "
+    "Output ONLY valid JSON that matches the requested schema."
 )
 
 PERSONAL_TODO_PROMPT_TEMPLATE = (
@@ -104,12 +118,14 @@ PERSONAL_TODO_PROMPT_TEMPLATE = (
     "Rules:\n"
     "- Include ONLY tasks explicitly assigned to or requested of {user_name}\n"
     "- Ignore tasks assigned to other participants\n"
-    "- Each task = exactly one sentence\n"
-    "- Do not cut off the final item; finish the sentence completely\n"
-    "- Format each line: [HH:MM:SS] [Assigner] → <concrete action>\n"
-    "  (use timestamp and speaker name exactly as they appear in the transcript)\n"
-    "- If no tasks are assigned to {user_name}, output one line: "
-    "'Задач для {user_name} не найдено.'\n\n"
+    "- Each task action must be exactly one complete sentence\n"
+    "- Use the timestamp and assigner exactly as they appear in the transcript\n"
+    "- Return ONLY valid JSON in this shape:\n"
+    '  {"items": [{"timestamp": "HH:MM:SS", "assigner": "Name", "action": "Concrete action sentence."}]}\n'
+    '- Use timestamp without brackets in JSON, for example "00:12:34"\n'
+    "- Use assigner without brackets in JSON\n"
+    '- If no tasks are assigned to {user_name}, return exactly: {"items": []}\n'
+    "- Do not wrap the JSON in markdown fences\n\n"
     "Transcript:\n---\n{transcript}\n---"
 )
 

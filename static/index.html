@@ -457,6 +457,45 @@
       color: var(--text);
       font-variant-numeric: tabular-nums;
     }
+
+    /* Scroll nav */
+    #scroll-nav {
+      position: fixed;
+      left: 1.25rem;
+      bottom: 1.25rem;
+      z-index: 1000;
+      display: flex;
+      flex-direction: column;
+      gap: 0.4rem;
+    }
+
+    .scroll-btn {
+      width: 36px;
+      height: 36px;
+      background: rgba(15, 17, 23, 0.94);
+      border: 1px solid var(--border);
+      border-radius: 8px;
+      color: var(--text-muted);
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-size: 0.85rem;
+      backdrop-filter: blur(10px);
+      box-shadow: 0 4px 18px rgba(0,0,0,0.38);
+      transition: color 0.2s, background 0.2s, border-color 0.2s;
+    }
+
+    .scroll-btn:hover {
+      color: var(--text);
+      background: rgba(26, 29, 39, 0.98);
+      border-color: var(--accent);
+    }
+
+    .scroll-btn.active {
+      border-color: var(--accent);
+      color: var(--accent);
+    }
   </style>
 </head>
 <body>
@@ -570,6 +609,11 @@
       <div id="content-tldr" class="summary-content"></div>
     </div>
   </main>
+
+  <div id="scroll-nav">
+    <button id="scroll-up-btn" class="scroll-btn" title="Наверх">▲</button>
+    <button id="scroll-down-btn" class="scroll-btn" title="Вниз">▼</button>
+  </div>
 
   <div id="timer-shell" style="display:none">
     <div id="timer-widget">
@@ -882,6 +926,47 @@
           break;
       }
     }
+
+    // ── Scroll navigation ──────────────────────────────────────────────────
+    let _scrollSaved = null;
+    let _scrollLastAction = null;
+    const scrollUpBtn = document.getElementById('scroll-up-btn');
+    const scrollDownBtn = document.getElementById('scroll-down-btn');
+
+    scrollUpBtn.addEventListener('click', () => {
+      if (_scrollLastAction === 'down') {
+        const target = _scrollSaved;
+        _scrollSaved = null;
+        _scrollLastAction = 'up-return';
+        scrollUpBtn.classList.remove('active');
+        scrollDownBtn.classList.remove('active');
+        window.scrollTo({ top: target, behavior: 'smooth' });
+      } else {
+        _scrollSaved = window.scrollY;
+        _scrollLastAction = 'up';
+        scrollUpBtn.classList.add('active');
+        scrollDownBtn.classList.remove('active');
+        window.scrollTo({ top: 0, behavior: 'smooth' });
+      }
+    });
+
+    scrollDownBtn.addEventListener('click', () => {
+      if (_scrollLastAction === 'up') {
+        const target = _scrollSaved;
+        _scrollSaved = null;
+        _scrollLastAction = 'down-return';
+        scrollDownBtn.classList.remove('active');
+        scrollUpBtn.classList.remove('active');
+        window.scrollTo({ top: target, behavior: 'smooth' });
+      } else {
+        _scrollSaved = window.scrollY;
+        _scrollLastAction = 'down';
+        scrollDownBtn.classList.add('active');
+        scrollUpBtn.classList.remove('active');
+        window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' });
+      }
+    });
+    // ──────────────────────────────────────────────────────────────────────
 
     form.addEventListener('submit', async (e) => {
       e.preventDefault();

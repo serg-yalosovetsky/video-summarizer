@@ -386,6 +386,34 @@ class ProcessGeneratorTests(unittest.IsolatedAsyncioTestCase):
             "**Problem**: The discussion addresses two main technical issues and proposes next steps.",
         )
 
+    async def test_process_generator_retries_invalid_structured_tldr(self):
+        with (
+            mock.patch.object(main, "settings", replace(main.settings, stage_delay_seconds=0)),
+            mock.patch.object(main, "notify_done", new=mock.AsyncMock()),
+            mock.patch.object(main, "clean_content", return_value="discussion transcript"),
+            mock.patch.object(main, "classify_is_meeting", return_value=False),
+            mock.patch.object(main, "generate_summary", return_value="Full summary."),
+            mock.patch.object(main, "classify_text_language", return_value="ru"),
+            mock.patch.object(
+                main,
+                "generate_short_summary",
+                side_effect=[
+                    ValueError("Model returned invalid structured content"),
+                    "Short recap.\n- Investigate the deployment issue.\n- Share the fix plan.",
+                ],
+            ),
+        ):
+            chunks = []
+            async for item in main.process_generator(None, "meeting chat", "ru"):
+                chunks.append(item)
+
+        events = decode_events(chunks)
+        tldr_event = next(event for event in events if event["event"] == "tldr_done")
+        self.assertEqual(
+            tldr_event["payload"]["text"],
+            "Short recap.\n- Investigate the deployment issue.\n- Share the fix plan.",
+        )
+
     async def test_lifespan_checks_ollama_before_loading_canary(self):
         calls = []
 
@@ -1094,6 +1122,84 @@ class SummaryHelperTests(unittest.TestCase):
             ),
             fallback,
         )
+
+    def test_generate_short_summary_renders_structured_json(self):
+        raw = json.dumps(
+            {
+                "summary": "Коротко: команда обсудила проблему деплоя.",
+                "problem": "Продовый деплой падает на миграции базы данных.",
+                "ways_to_solve": [
+                    "Проверить порядок запуска миграций.",
+                    "Добавить предварительную валидацию схемы.",
+                ],
+                "blockers": ["Нет доступа к логам production у части команды."],
+                "estimated_resolution": "Собрать логи сегодня и выкатить фикс завтра утром.",
+                "key_points": [],
+            },
+            ensure_ascii=False,
+        )
+
+        with mock.patch.object(summary, "call_ollama", return_value=raw) as call_ollama:
+            result = summary.generate_short_summary("Some transcript")
+
+        self.assertEqual(
+            result,
+            "\n".join(
+                [
+                    "**Problem**: Продовый деплой падает на миграции базы данных.",
+                    "**Ways to solve**:",
+                    "- Проверить порядок запуска миграций.",
+                    "- Добавить предварительную валидацию схемы.",
+                    "**Blockers**:",
+                    "- Нет доступа к логам production у части команды.",
+                    "**Estimated resolution**: Собрать логи сегодня и выкатить фикс завтра утром.",
+                    "**Summary**: Коротко: команда обсудила проблему деплоя.",
+                ]
+            ),
+        )
+        self.assertEqual(call_ollama.call_args.kwargs["format"], summary.SHORT_SUMMARY_SCHEMA)
+
+    def test_generate_short_summary_accepts_fenced_json(self):
+        raw = """```json
+        {"summary":"Brief recap.","problem":"","ways_to_solve":[],"blockers":[],"estimated_resolution":"","key_points":["First point.","Second point."]}
+        ```"""
+
+        with mock.patch.object(summary, "call_ollama", return_value=raw):
+            result = summary.generate_short_summary("Some transcript")
+
+        self.assertEqual(result, "Brief recap.\n- First point.\n- Second point.")
+
+    def test_generate_personal_todo_renders_structured_json(self):
+        raw = json.dumps(
+            {
+                "items": [
+                    {
+                        "timestamp": "00:12:34",
+                        "assigner": "Alice",
+                        "action": "Проверить логи и прислать статус в общий чат.",
+                    }
+                ]
+            },
+            ensure_ascii=False,
+        )
+
+        with (
+            mock.patch.object(summary, "load_user_profile", return_value={"primary_name": "Сергей", "aliases": ["Сергей"]}),
+            mock.patch.object(summary, "call_ollama", return_value=raw) as call_ollama,
+        ):
+            result = summary.generate_personal_todo("Meeting transcript")
+
+        self.assertEqual(result, "- [00:12:34] [Alice] → Проверить логи и прислать статус в общий чат.")
+        self.assertEqual(call_ollama.call_args.kwargs["format"], summary.PERSONAL_TODO_SCHEMA)
+
+    def test_generate_personal_todo_returns_default_message_for_empty_items(self):
+        with (
+            mock.patch.object(summary, "load_user_profile", return_value={"primary_name": "Сергей", "aliases": ["Сергей"]}),
+            mock.patch.object(summary, "call_ollama", return_value='{"items": []}'),
+        ):
+            result = summary.generate_personal_todo("Meeting transcript")
+
+        self.assertEqual(result, "Задач для Сергей не найдено.")
 
 
 class DiarizationPreparationTests(unittest.TestCase):

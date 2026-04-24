@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import json
 import os
 import re
 
 from config import settings
 from helpers import call_ollama, load_user_profile
+from pydantic import BaseModel, Field
 from prompts import (
     CLEAN_PROMPT_TEMPLATE,
     CLEAN_SYSTEM,
@@ -19,6 +21,7 @@ from prompts import (
     RUSSIAN_TRANSLATION_PROMPT_TEMPLATE,
     RUSSIAN_TRANSLATION_SYSTEM,
     SHORT_SUMMARY_PROMPT_TEMPLATE,
+    SHORT_SUMMARY_SYSTEM,
     SUMMARY_PROMPT_TEMPLATE,
     SUMMARY_SYSTEM,
 )
@@ -66,6 +69,31 @@ SUMMARY_DIRECT_MAX_CHARS = settings.ollama_num_ctx * 3
 SUMMARY_CHUNK_TARGET_CHARS = 6000
 SUMMARY_RETRY_MIN_TOKENS = 2048
 TLDR_RETRY_MIN_TOKENS = 1536
+_JSON_FENCE_RE = re.compile(r"```(?:json)?\s*(.*?)```", re.IGNORECASE | re.DOTALL)
+_TIMESTAMP_VALUE_RE = re.compile(r"^\d{2}:\d{2}:\d{2}$")
+
+
+class PersonalTodoItem(BaseModel):
+    timestamp: str = Field(default="")
+    assigner: str = Field(default="")
+    action: str = Field(default="")
+
+
+class PersonalTodoResponse(BaseModel):
+    items: list[PersonalTodoItem] = Field(default_factory=list)
+
+
+class ShortSummaryResponse(BaseModel):
+    summary: str = Field(default="")
+    problem: str = Field(default="")
+    ways_to_solve: list[str] = Field(default_factory=list)
+    blockers: list[str] = Field(default_factory=list)
+    estimated_resolution: str = Field(default="")
+    key_points: list[str] = Field(default_factory=list)
+
+
+PERSONAL_TODO_SCHEMA = PersonalTodoResponse.model_json_schema()
+SHORT_SUMMARY_SCHEMA = ShortSummaryResponse.model_json_schema()
 
 
 def trim_visual_context(visual_context: str) -> str:
@@ -320,6 +348,124 @@ def prefer_meaningful_content(primary: str, fallback: str) -> str:
     return local_preclean_content(fallback)
 
 
+def _clean_structured_text(text: str, *, min_chars: int = 1) -> str:
+    normalized = local_preclean_content(text or "")
+    if len(normalized) < min_chars:
+        return ""
+    if looks_like_missing_content_response(normalized):
+        return ""
+    return normalized
+
+
+def _clean_structured_list(items: list[str], *, min_chars: int = 1) -> list[str]:
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    for item in items or []:
+        normalized = _clean_structured_text(str(item), min_chars=min_chars)
+        if not normalized or normalized in seen:
+            continue
+        cleaned.append(normalized)
+        seen.add(normalized)
+    return cleaned
+
+
+def _iter_json_candidates(raw: str):
+    stripped = (raw or "").strip()
+    if stripped:
+        yield stripped
+    for match in _JSON_FENCE_RE.finditer(raw or ""):
+        candidate = match.group(1).strip()
+        if candidate:
+            yield candidate
+
+
+def _extract_first_json_value(raw: str) -> object:
+    decoder = json.JSONDecoder()
+    text = (raw or "").lstrip("\ufeff \n\t")
+    for idx, char in enumerate(text):
+        if char not in "{[":
+            continue
+        try:
+            payload, _ = decoder.raw_decode(text[idx:])
+        except json.JSONDecodeError:
+            continue
+        return payload
+    raise ValueError("No JSON object found in model output")
+
+
+def _parse_structured_response(raw: str, schema_model: type[BaseModel]) -> BaseModel:
+    if looks_like_missing_content_response(raw):
+        raise ValueError("Model returned a missing-content placeholder")
+
+    last_error: Exception | None = None
+    for candidate in _iter_json_candidates(raw):
+        try:
+            return schema_model.model_validate_json(candidate)
+        except Exception as exc:
+            last_error = exc
+        try:
+            return schema_model.model_validate(_extract_first_json_value(candidate))
+        except Exception as exc:
+            last_error = exc
+
+    raise ValueError("Model returned invalid structured content") from last_error
+
+
+def _render_short_summary(response: ShortSummaryResponse) -> str:
+    summary_text = _clean_structured_text(response.summary, min_chars=6)
+    problem = _clean_structured_text(response.problem, min_chars=6)
+    ways_to_solve = _clean_structured_list(response.ways_to_solve, min_chars=4)
+    blockers = _clean_structured_list(response.blockers, min_chars=4)
+    estimated_resolution = _clean_structured_text(response.estimated_resolution, min_chars=4)
+    key_points = _clean_structured_list(response.key_points, min_chars=4)
+
+    if any([problem, ways_to_solve, blockers, estimated_resolution]):
+        lines: list[str] = []
+        if problem:
+            lines.append(f"**Problem**: {problem}")
+        if ways_to_solve:
+            lines.append("**Ways to solve**:")
+            lines.extend(f"- {item}" for item in ways_to_solve)
+        if blockers:
+            lines.append("**Blockers**:")
+            lines.extend(f"- {item}" for item in blockers)
+        if estimated_resolution:
+            lines.append(f"**Estimated resolution**: {estimated_resolution}")
+        if summary_text:
+            lines.append(f"**Summary**: {summary_text}")
+        return "\n".join(lines)
+
+    lines = []
+    if summary_text:
+        lines.append(summary_text)
+    lines.extend(f"- {item}" for item in key_points)
+    rendered = "\n".join(lines).strip()
+    if rendered:
+        return rendered
+    raise ValueError("Structured short summary contained no meaningful content")
+
+
+def _render_personal_todo(response: PersonalTodoResponse, *, user_name: str) -> str:
+    lines: list[str] = []
+    seen: set[str] = set()
+    for item in response.items:
+        timestamp = str(item.timestamp or "").strip().strip("[]")
+        assigner = _clean_structured_text(str(item.assigner or "").strip().strip("[]"), min_chars=1)
+        action = _clean_structured_text(item.action, min_chars=6)
+        if not _TIMESTAMP_VALUE_RE.fullmatch(timestamp):
+            continue
+        if not assigner or not action:
+            continue
+        rendered = f"- [{timestamp}] [{assigner}] → {action}"
+        if rendered in seen:
+            continue
+        lines.append(rendered)
+        seen.add(rendered)
+    if lines:
+        return "\n".join(lines)
+    return f"Задач для {user_name} не найдено."
+
+
 def count_timestamps(text: str) -> int:
     return len(TIMESTAMP_RE.findall(text or ""))
 
@@ -460,9 +606,17 @@ def generate_short_summary(
     *,
     options_override: dict | None = None,
 ) -> str:
+    transcript = local_preclean_content(transcript)
     prompt = SHORT_SUMMARY_PROMPT_TEMPLATE.format(transcript=transcript)
     opts = {**OLLAMA_SUMMARY_OPTIONS, **(options_override or {})}
-    return call_ollama(prompt, SUMMARY_SYSTEM, options=opts)
+    raw = call_ollama(
+        prompt,
+        SHORT_SUMMARY_SYSTEM,
+        options=opts,
+        format=SHORT_SUMMARY_SCHEMA,
+    )
+    response = _parse_structured_response(raw, ShortSummaryResponse)
+    return _render_short_summary(response)
 
 
 def generate_personal_todo(
@@ -470,6 +624,7 @@ def generate_personal_todo(
     *,
     options_override: dict | None = None,
 ) -> str:
+    transcript = local_preclean_content(transcript)
     user_profile = load_user_profile()
     prompt = PERSONAL_TODO_PROMPT_TEMPLATE.format(
         transcript=transcript,
@@ -477,7 +632,14 @@ def generate_personal_todo(
         user_aliases=", ".join(user_profile["aliases"]),
     )
     opts = {**OLLAMA_SUMMARY_OPTIONS, **(options_override or {})}
-    return call_ollama(prompt, PERSONAL_TODO_SYSTEM, options=opts)
+    raw = call_ollama(
+        prompt,
+        PERSONAL_TODO_SYSTEM,
+        options=opts,
+        format=PERSONAL_TODO_SCHEMA,
+    )
+    response = _parse_structured_response(raw, PersonalTodoResponse)
+    return _render_personal_todo(response, user_name=user_profile["primary_name"])
 
 
 def detect_language_heuristically(text: str) -> str:

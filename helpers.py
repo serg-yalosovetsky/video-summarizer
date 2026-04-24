@@ -327,6 +327,7 @@ def call_ollama(
     timeout: float | None = None,
     model: str | None = None,
     options: dict | None = None,
+    format: dict | None = None,
 ) -> str:
     request_model = model or OLLAMA_MODEL
     resolved_options = options or {}
@@ -337,6 +338,7 @@ def call_ollama(
         model=request_model,
         url=OLLAMA_URL,
         options=resolved_options,
+        schema=format,
         timeout=resolved_timeout,
     )
     payload = {
@@ -346,6 +348,8 @@ def call_ollama(
         "stream": False,
         "options": resolved_options,
     }
+    if format is not None:
+        payload["format"] = format
     with start_observation(
         "ollama.generate",
         as_type="generation",
@@ -354,6 +358,7 @@ def call_ollama(
             "prompt": prompt,
             "system": system,
             "options": payload["options"],
+            "format": format,
         },
         metadata={"provider": "ollama", "url": OLLAMA_URL},
     ) as generation:

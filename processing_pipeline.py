@@ -92,6 +92,7 @@ class PipelineDeps:
     filter_reliable_context: Callable[[str, dict], str]
     substitute_speaker_names: Callable[[str, dict], str]
     release_canary: Callable[[], None]
+    release_diarizer: Callable[[], None]
     unload_ollama: Callable[[], None]
 
 
@@ -747,32 +748,49 @@ async def _generate_tldr_text(
         if is_meeting
         else (lambda: deps.generate_short_summary(summary_input))
     )
-    tldr_text = await _run_traced_background(
-        deps,
-        loop,
-        f"pipeline.generate-{tldr_stage}",
-        base_callable,
-        input_payload={"text_chars": len(summary_input), "is_meeting": is_meeting},
-        metadata={"stage": tldr_stage},
-        output_builder=lambda text: {"text_length": len(text)},
-    )
-    if deps.looks_like_missing_content_response(tldr_text):
-        deps.log.warning("  [gemma/%s] model returned missing-content placeholder; retrying with temperature=0.3", tldr_stage)
+    tldr_text: str | None = None
+    try:
+        tldr_text = await _run_traced_background(
+            deps,
+            loop,
+            f"pipeline.generate-{tldr_stage}",
+            base_callable,
+            input_payload={"text_chars": len(summary_input), "is_meeting": is_meeting},
+            metadata={"stage": tldr_stage},
+            output_builder=lambda text: {"text_length": len(text)},
+        )
+    except Exception as exc:
+        deps.log.warning(
+            "  [gemma/%s] invalid structured output or generation error; retrying with temperature=0.3: %s",
+            tldr_stage,
+            exc,
+        )
+
+    if tldr_text is None or deps.looks_like_missing_content_response(tldr_text):
+        if tldr_text is not None:
+            deps.log.warning(
+                "  [gemma/%s] model returned missing-content placeholder; retrying with temperature=0.3",
+                tldr_stage,
+            )
         truncated = summary_input[:8000]
         retry_callable = (
             (lambda: deps.generate_personal_todo(truncated, options_override={"temperature": 0.3}))
             if is_meeting
             else (lambda: deps.generate_short_summary(truncated, options_override={"temperature": 0.3}))
         )
-        tldr_text = await _run_traced_background(
-            deps,
-            loop,
-            f"pipeline.retry-{tldr_stage}",
-            retry_callable,
-            input_payload={"text_chars": len(truncated), "is_meeting": is_meeting},
-            metadata={"stage": f"{tldr_stage}-retry"},
-            output_builder=lambda text: {"text_length": len(text)},
-        )
+        try:
+            tldr_text = await _run_traced_background(
+                deps,
+                loop,
+                f"pipeline.retry-{tldr_stage}",
+                retry_callable,
+                input_payload={"text_chars": len(truncated), "is_meeting": is_meeting},
+                metadata={"stage": f"{tldr_stage}-retry"},
+                output_builder=lambda text: {"text_length": len(text)},
+            )
+        except Exception as exc:
+            deps.log.warning("  [gemma/%s] retry failed — skipping tldr: %s", tldr_stage, exc)
+            return "Не вдалося згенерувати короткий підсумок."
         if deps.looks_like_missing_content_response(tldr_text):
             deps.log.warning("  [gemma/%s] both attempts failed — skipping tldr", tldr_stage)
             return "Не вдалося згенерувати короткий підсумок."
@@ -977,6 +995,7 @@ async def process_generator(
                     deps=deps,
                 ):
                     yield event
+                await loop.run_in_executor(None, deps.release_diarizer)
                 async for event in _sleep_between_stages(deps, "frame analysis"):
                     yield event
                 async for event in _analyze_frames_step(state, loop=loop, deps=deps):

@@ -25,6 +25,7 @@ def save_text_request(
     model: str,
     url: str,
     options: dict,
+    schema: dict | None,
     timeout: float,
 ) -> None:
     folder = _next_dir(f"text_{model.replace(':', '-')}")
@@ -39,6 +40,8 @@ def save_text_request(
         "options": options,
     }
     (folder / "config.json").write_text(json.dumps(config, indent=2), encoding="utf-8")
+    if schema:
+        (folder / "schema.json").write_text(json.dumps(schema, indent=2), encoding="utf-8")
 
 
 def save_vision_request(

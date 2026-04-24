@@ -96,8 +96,16 @@ from summary import (
     translate_summary_to_russian,
 )
 from contextlib import asynccontextmanager
+from transcribe import (
+    WavConversionResult,
+    convert_to_wav,
+    release_canary_model,
+    run_diarization,
+    transcribe_by_segments,
+    transcribe_with_canary,
+)
+from transcribe_diarization import release_diarizer
 from tracing import (
-    check_langfuse_auth,
     current_trace_context,
     flush_langfuse,
     langfuse_is_enabled,
@@ -109,15 +117,6 @@ OLLAMA_MODEL = settings.ollama_model
 OLLAMA_CLEAN_MODEL = settings.ollama_clean_model
 ARTIFACTS_DIR = settings.artifacts_dir
 ARTIFACTS_DIR.mkdir(exist_ok=True)
-
-from transcribe import (
-    WavConversionResult,
-    convert_to_wav,
-    release_canary_model,
-    run_diarization,
-    transcribe_by_segments,
-    transcribe_with_canary,
-)
 
 
 def _build_artifact_stem(label: str) -> str:
@@ -195,6 +194,7 @@ async def process_generator(
         filter_reliable_context=filter_reliable_context,
         substitute_speaker_names=substitute_speaker_names,
         release_canary=release_canary_model,
+        release_diarizer=release_diarizer,
         unload_ollama=lambda: unload_ollama_models(
             settings.ollama_model,
             settings.ollama_clean_model,

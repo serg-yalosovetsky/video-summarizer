@@ -76,6 +76,22 @@ def get_diarizer():
     return pipeline
 
 
+def release_diarizer() -> None:
+    import torch
+
+    if get_diarizer.cache_info().currsize == 0:
+        return
+    try:
+        pipeline = get_diarizer()
+        get_diarizer.cache_clear()
+        del pipeline
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        log.info("Pyannote diarizer released from CUDA.")
+    except Exception as exc:
+        log.warning("Failed to release diarizer: %s", exc)
+
+
 def _segments_from_itertracks(annotation) -> list[LegacySegment]:
     return [
         (float(turn.start), float(turn.end), str(speaker))
