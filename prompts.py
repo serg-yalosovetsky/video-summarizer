@@ -114,20 +114,97 @@ PERSONAL_TODO_SYSTEM = (
 
 PERSONAL_TODO_PROMPT_TEMPLATE = (
     "Read the meeting transcript below and extract action items assigned to {user_name}. "
-    "{user_name} may also appear as: {user_aliases}.\n\n"
-    "Rules:\n"
-    "- Include ONLY tasks explicitly assigned to or requested of {user_name}\n"
-    "- Ignore tasks assigned to other participants\n"
-    "- Each task action must be exactly one complete sentence\n"
-    "- Use the timestamp and assigner exactly as they appear in the transcript\n"
-    "- Return ONLY valid JSON in this shape:\n"
-    '  {{"items": [{{"timestamp": "HH:MM:SS", "assigner": "Name", "action": "Concrete action sentence."}}]}}\n'
-    '- Use timestamp without brackets in JSON, for example "00:12:34"\n'
-    "- Use assigner without brackets in JSON\n"
-    '- If no tasks are assigned to {user_name}, return exactly: {{"items": []}}\n'
-    "- Do not wrap the JSON in markdown fences\n\n"
+    "{user_name} may also appear as any of these aliases or forms: {user_aliases}. "
+    "Treat all of them as the same person.\n\n"
+
+    "Your task is to find ONLY action items that clearly belong to {user_name}.\n\n"
+
+    "Include an item when at least one of these is true:\n"
+    "- another participant directly asks, instructs, or assigns {user_name} to do something\n"
+    "- a task is addressed to one of {user_name}'s aliases, initials, transliterations, or speaker labels\n"
+    "- {user_name} explicitly accepts, volunteers, or commits to doing something\n"
+    "- the wording is indirect but still clearly assigns responsibility to {user_name}, for example: "
+    "\"please check\", \"you need to\", \"can you fix\", \"let's ask {user_name} to\", "
+    "\"{user_name} will do\", \"{user_name} should\", \"{user_name} can take this\"\n\n"
+
+    "Do NOT include an item when any of these is true:\n"
+    "- the transcript only mentions {user_name} without giving them a concrete action\n"
+    "- the action belongs to someone else\n"
+    "- it is only a discussion, suggestion, background detail, status update, or summary of a problem\n"
+    "- the task is ambiguous and it is not clear that {user_name} is responsible\n\n"
+
+    "Extraction rules:\n"
+    "- Use ONLY information present in the transcript\n"
+    "- Do NOT infer tasks from general context if the responsibility is unclear\n"
+    "- Prefer precision over recall: if unsure, omit the item\n"
+    "- Each action must be one concrete, complete sentence\n"
+    "- Preserve the same language as the transcript\n"
+    "- Keep the action concise and specific\n"
+    "- Deduplicate overlapping items; keep the clearest version\n"
+    "- Use the timestamp from the line where the task is stated most explicitly\n"
+    "- Use the assigner exactly as it appears in the transcript when possible\n"
+    "- If {user_name} assigns a task to themselves or explicitly commits to it, use {user_name} as assigner\n"
+    "- If no clear assigner is visible but the responsible line clearly belongs to a speaker label or alias, use that exact visible label/name\n\n"
+
+    "Return ONLY valid JSON in exactly this shape:\n"
+    '{{"items": [{{"timestamp": "HH:MM:SS", "assigner": "Name", "action": "Concrete action sentence."}}]}}\n\n'
+
+    "Strict JSON rules:\n"
+    '- Use timestamp without brackets, for example "00:12:34"\n'
+    '- Use assigner without brackets\n'
+    '- Do not add any fields\n'
+    '- Do not output markdown fences\n'
+    '- Do not output explanations or commentary\n'
+    '- If there are no action items for {user_name}, return exactly: {{"items": []}}\n\n'
+
     "Transcript:\n---\n{transcript}\n---"
 )
+
+
+PERSONAL_TODO_PROMPT_TEMPLATE_FEW_SHOT = (
+    "Read the meeting transcript below and extract action items assigned to {user_name}. "
+    "{user_name} may also appear as any of these aliases or forms: {user_aliases}. "
+    "Treat all of them as the same person.\n\n"
+
+    "Include ONLY tasks that clearly belong to {user_name}. "
+    "A task counts if it is directly assigned, clearly requested, or explicitly accepted by {user_name}. "
+    "If responsibility is unclear, omit it.\n\n"
+
+    "Positive examples:\n"
+    'Transcript line: [00:12:34] [Agnis]: Sergey, please check why Deep-Agent crashes on startup.\n'
+    'Output item: {{"timestamp":"00:12:34","assigner":"Agnis","action":"Check why Deep-Agent crashes on startup."}}\n\n'
+    'Transcript line: [00:18:02] [SY]: Okay, I will create the test database today.\n'
+    'Output item: {{"timestamp":"00:18:02","assigner":"SY","action":"Create the test database today."}}\n\n'
+    'Transcript line: [00:22:10] [Agnis]: Can you also get VPN access?\n'
+    'Output item: {{"timestamp":"00:22:10","assigner":"Agnis","action":"Get VPN access."}}\n\n'
+
+    "Negative examples:\n"
+    'Transcript line: [00:09:11] [Agnis]: Sergey had this issue before.\n'
+    'Output: no item\n\n'
+    'Transcript line: [00:14:50] [Agnis]: We need to fix this bug.\n'
+    'Output: no item if it is not clear who is responsible\n\n'
+
+    "Rules:\n"
+    "- Use ONLY information present in the transcript\n"
+    "- Ignore tasks assigned to other participants\n"
+    "- Ignore mentions of {user_name} that do not contain a concrete action\n"
+    "- Each action must be exactly one complete sentence\n"
+    "- Preserve the same language as the transcript\n"
+    "- Keep actions concrete, specific, and short\n"
+    "- Deduplicate overlapping items\n"
+    "- Use the timestamp where the task is stated most explicitly\n"
+    "- Use the assigner exactly as written in the transcript\n"
+    "- If {user_name} self-assigns or explicitly commits, use that visible name/alias as assigner\n\n"
+
+    "Return ONLY valid JSON in exactly this shape:\n"
+    '{{"items": [{{"timestamp": "HH:MM:SS", "assigner": "Name", "action": "Concrete action sentence."}}]}}\n'
+    '- If no tasks are assigned to {user_name}, return exactly: {{"items": []}}\n'
+    "- Do not wrap JSON in markdown fences\n"
+    "- Do not output any text except JSON\n\n"
+
+    "Transcript:\n---\n{transcript}\n---"
+)
+
 
 MEETING_DETECTION_SYSTEM = (
     "You are a classifier. Answer only 'yes' or 'no', nothing else."
